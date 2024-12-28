@@ -1084,11 +1084,295 @@ int main()
 
 ## Running Multiple Threads
 
+### Introduction
+
+#### 1. 分叉-合并并行（Fork-Join Parallelism）
+- **概念**：这是一种基本的并行编程模式
+- **工作方式**：
+  - **分叉（Fork）**：主线程创建（分叉）多个子线程执行任务
+  - **合并（Join）**：等待所有子线程完成后，再继续执行主线程
+- **特点**：
+  - 结构清晰
+  - 易于理解和实现
+  - 适合处理可以并行的独立任务
+
+#### 2. 线程屏障（Thread Barriers）
+- **作用**：同步多个线程的执行点
+- **工作原理**：
+  - 设置一个同步点（屏障点）
+  - 当线程达到屏障点时会等待
+  - 直到所有线程都到达屏障点才继续执行
+- **应用场景**：
+  - 需要等待所有并行任务完成后才能继续的情况
+  - 多个线程需要同步进行的场合
+
+#### 3. 线程句柄管理（Thread Handles in Vector）
+- **目的**：更好地管理多个线程
+- **优势**：
+  - 可以批量管理线程
+  - 便于进行循环操作
+  - 更容易实现动态线程数量的调整
+- **实现方式**：
+  ```cpp
+  std::vector<std::thread> threads;
+  // 添加线程
+  threads.push_back(std::thread(...));
+  ```
+
+#### 4. 并发限制（Concurrency Ban）
+- **含义**：在并发编程中的各种限制和约束
+- **类型**：
+  - 正式限制：语言规范或标准库强制的限制
+  - 非正式限制：最佳实践或性能考虑导致的限制
+- **目的**：
+  - 避免数据竞争
+  - 确保线程安全
+  - 提高程序可靠性
+
+#### 总结
+这个章节主要介绍：
+1. 如何同时管理和运行多个线程
+2. 基本的并行编程模式
+3. 线程同步机制
+4. 线程管理的实用技巧
+5. 并发编程中需要注意的限制和约束
+
+
+
+### Fork-Join Parallelism
+
+Using threads follows a basic concept called "fork-join-parallelism". The basic mechanism of this concept follows a simple **three-step pattern**:
+
+1. **Split** the flow of execution into a parallel thread ("fork")
+2. **Perform** some work in both the main thread and the parallel thread
+3. **Wait** for the parallel thread to finish and unite the split flow of execution again ("join")
+
+The following diagram illustrates the basic idea of forking:
+
+![C2-6-A2 multithreading](assets/C2-6-A2 multithreading-5373669.jpg)
+
+In the main thread, the program flow is forked into three parallel branches. In both worker branches, some work is performed - which is why threads are often referred to as "worker threads". Once the work is completed, the flow of execution is united again in the main function using the `join()` command. In this example, **join acts as a barrier where all threads are united**. The execution of main is in fact halted, until both worker threads have successfully completed their respective work.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+
+void printHello()
+{
+    // perform work
+    std::cout << "Hello from Worker thread #" << std::this_thread::get_id() << std::endl;
+}
+
+int main()
+{
+    // create threads
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < 5; ++i)
+    {
+        // copying thread objects causes a compile error
+        /*
+        std::thread t(printHello);
+        threads.push_back(t); 
+        */
+
+        // moving thread objects will work
+        threads.emplace_back(std::thread(printHello));
+    }
+
+    // do something in main()
+    std::cout << "Hello from Main thread #" << std::this_thread::get_id() << std::endl;
+
+    // call join on all thread objects using a range-based loop
+    for (auto &t : threads)
+        t.join();
+
+    return 0;
+}
+
+```
+
+In the following example, a number of threads is created and added to a vector. **The basic idea is to loop over the vector at the end of the main function and call join on all the thread objects inside the vector**.
+
+When we try to compile the program using the **`push_back()`** function (which is the usual way in most cases), we get a **compiler error**. The problem with our code is that by pushing the thread object into the vector, we **attempt to make a copy of it**. However, **thread objects do not have a copy constructor and thus can not be duplicated**. **If this were possible, we would create yet another branch** in the flow of execution - **which is not what we want**. The solution to this problem is to use move semantics, which provide a convenient way for the contents of objects to be 'moved' between objects, rather than copied. It might be a good idea at this point to refresh your knowledge on move semantics, on rvalues and lvalues as well as on rvalue references, as we will make use of these concepts throughout the course.
+
+**To solve our problem, we can use the function `emplace_back()` instead of `push_back()`**, which **internally uses move semantics** to move our thread object into the vector without making a copy. When executing the code, we get the following output:
+
+```
+Hello from Worker thread #Hello from Worker thread #140370329347840140370337740544
+Hello from Worker thread #140370320955136
+Hello from Worker thread #140370346133248
+
+Hello from Main thread #140370363660096
+Hello from Worker thread #140370312562432
+```
+
+This is surely not how we intended the console output to look like. When we take a close look at the call to `std::cout` in the thread function, we can see that it actually consists of three parts: the string "Hello from worker…", the respective thread id and finally the line break at the end. In the output, **all three components are completely intermingled**. Also, when the program is run several times, the output will look different with each execution. **This shows us two important properties of concurrent programs:**
+
+1. **The order in which threads are executed is non-deterministic**. Every time a program is executed, there is a chance for a completely different order of execution.
+2. **Threads may get preempted in the middle of execution** and another thread may be selected to run.
+
+These **two properties pose a major problem with concurrent applications**: A program may run correctly for thousands of times and suddenly, due to a particular interleaving of threads, there might be a problem. From a debugging perspective, **such errors are very hard to detect as they can not be reproduced easily.**
+
+
+
+### A First Concurrency Bug
+
+Let us adjust the program code from the previous example and use a Lambda instead of the function `printHello()`. Also, we will pass the loop counter i into the Lambda to enforce an individual wait time for each thread. The idea is to prevent the interleaving of text on the command line which we saw in the previous example.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <chrono>
+#include <random>
+#include <vector>
+
+int main()
+{
+    // create threads
+    std::vector<std::thread> threads;
+    for (size_t i = 0; i < 10; ++i)
+    {
+        // create new thread from a Lambda
+        threads.emplace_back([&i]() {
+
+            // wait for certain amount of time
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * i));
+
+            // perform work
+            std::cout << "Hello from Worker thread #" << i << std::endl;
+        });
+    }
+
+    // do something in main()
+    std::cout << "Hello from Main thread" << std::endl;
+
+    // call join on all thread objects using a range-based loop
+    for (auto &t : threads)
+        t.join();
+
+    return 0;
+}
+
+```
+
+When executing the code however, the following output is generated on the console:
+
+<img src="assets/CleanShot 2024-12-28 at 16.42.17@2x.png" alt="CleanShot 2024-12-28 at 16.42.17@2x" style="zoom:25%;" />
+
+Clearly this is not what we expected. Can you find the bug and fix the code so that each thread gets the corresponding integer ranging from 0 to 9?
+
+```cpp
+// change below 
+[&i]() {
+
+            // wait for certain amount of time
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * i));
+
+            // perform work
+            std::cout << "Hello from Worker thread #" << i << std::endl;
+        }
+// to this
+[i]() {
+
+            // wait for certain amount of time
+            std::this_thread::sleep_for(std::chrono::milliseconds(10 * i));
+
+            // perform work
+            std::cout << "Hello from Worker thread #" << i << std::endl;
+        }
+```
+
+
+
+## Exercise: Traffic Simulation
+
+### Overview
+
+The purpose of the program is to **simulate traffic in a city grid** consisting of **vehicles**, **streets**, and **intersections**. Vehicles will move randomly across the grid and change direction whenever they reach an intersection. Each object in the simulation (vehicles, streets, intersections) will operate independently in its own thread, making this a **concurrent simulation**.
+
+The goal is to carefully manage threads and synchronize them to avoid crashes, undefined behavior, and concurrency errors.
+
+---
+
+### **Class Structure**
+
+The simulation consists of the following main components:
+
+<img src="assets/CleanShot 2024-12-28 at 18.28.08@2x.png" alt="CleanShot 2024-12-28 at 18.28.08@2x" style="zoom:50%;" />
+
+- **`TrafficObject`**: A base class encapsulating default behavior shared by all traffic-related objects. It is abstract and will not have direct instances.
+- **`Intersection`**, **`Vehicle`**, and **`Street`**: Derived classes inheriting from `TrafficObject`.
+- **`Graphics`**: Handles visualization by rendering all `TrafficObject` instances on a top-view map of a city (e.g., New York, Paris).
+
+---
+
+### **Program Workflow**
+
+The program has two primary flows of execution:
+
+1. **Main Function Workflow**: Responsible for initializing the simulation.
+2. **Vehicle Execution Workflow**: Manages the behavior of each vehicle in its thread.
+
+<img src="assets/CleanShot 2024-12-28 at 18.28.50@2x.png" alt="CleanShot 2024-12-28 at 18.28.50@2x" style="zoom:50%;" />
+
+#### **Main Function Workflow**
+1. **Create and Connect Intersections and Streets**: Establish relationships between intersections and streets.
+2. **Assign Street and Target Intersection to Vehicles**: Each vehicle is assigned a street and a destination intersection.
+3. **Simulate Vehicles**: Start a thread for each vehicle, running its `drive()` function.
+4. **Visualize TrafficObjects**: Continuously update and render the positions of all objects.
+
+#### **Vehicle Execution Workflow**
+1. **Initialize Stopwatch**: Used to track elapsed time.
+2. **Compute Time Difference**: Calculate the time since the last update.
+3. **Update Vehicle Position**: Adjust the vehicle's position based on its velocity and heading.
+4. **Check for End of Street**: Determine if the vehicle has reached the end of its current street.
+5. **Pick New Destination**: If yes, select a new intersection and street to continue driving. Else back to step 3
+6. **Reset Stopwatch**: Restart the stopwatch for the next iteration.
+
+---
+
+### **Tasks**
+
+#### **Task 1.1**: Thread Barrier in Destructor
+- In the `TrafficObject` base class, implement a **thread barrier** in the destructor to ensure all threads stored in the `_threads` vector are joined before the object is destroyed.
+
+#### **Task 1.2**: Start Vehicle Threads
+- In the `Vehicle` class, start a thread that runs the `drive()` member function.
+- Add the created thread to the `_threads` vector in the parent class (`TrafficObject`).
+
+#### **Task 1.3**: Analyze Thread Usage
+- Vary the number of vehicles (e.g., 2, 5, 20) and observe the number of threads created using tools like `top` (Linux) or Task Manager (Windows).
+- Measure the CPU load for different vehicle counts and analyze performance.
+
+---
+
+### **Expected Simulation Output**
+
+Once the tasks are completed, the simulation should look like this:
+- **Green dots** represent intersections.
+- **Streets** are implied between intersections but not directly visualized.
+- **Vehicles** (large circles) move along streets, slow down at intersections, and change direction.
+
+### Build Instructions
+
+*To run this code, you will need to use the virtual desktop*. In the desktop you can use Terminator or the terminal in Visual Studio Code.
+
+Once in the virtual desktop, to compile and run the code, create a `build` directory and use `cmake` and `make` as follows:
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
+./traffic_simulation
+```
 
 
 
 
-## Exercise
+
+
 
 
 
