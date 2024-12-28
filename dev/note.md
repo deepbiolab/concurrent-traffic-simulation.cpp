@@ -1368,7 +1368,126 @@ make
 ./traffic_simulation
 ```
 
+Here's a detailed text summary of the traffic simulation project, incorporating both the flow diagrams and actual code snippets:
 
+
+
+### Code Walkthrough
+
+The project simulates traffic in a city grid using three main types of objects:
+- Vehicles
+- Streets 
+- Intersections
+
+All these objects inherit from a common base class `TrafficObject`:
+
+```cpp
+// TrafficObject.cpp
+class TrafficObject {
+protected:
+    ObjectType _type;                 // identifies the class type
+    int _id;                         // every traffic object has its own unique id
+    double _posX, _posY;             // vehicle position in pixels
+    std::vector<std::thread> _threads;// holds all threads that have been launched within this object
+
+private:
+    static int _idCnt;               // global variable for counting object ids
+};
+```
+
+The main program consists of three major parts:
+
+```cpp
+// TrafficSimulator-L1.cpp
+int main() {
+    /* PART 1 : Set up traffic objects */
+    std::vector<std::shared_ptr<Street>> streets;
+    std::vector<std::shared_ptr<Intersection>> intersections;
+    std::vector<std::shared_ptr<Vehicle>> vehicles;
+    std::string backgroundImg;
+    
+    int nVehicles = 4;
+    createTrafficObjects(streets, intersections, vehicles, backgroundImg, nVehicles);
+
+    /* PART 2 : simulate traffic objects */
+    std::for_each(vehicles.begin(), vehicles.end(), [](std::shared_ptr<Vehicle> &v) {
+        v->simulate();
+    });
+
+    /* PART 3 : Launch visualization */
+    // ... visualization code ...
+}
+```
+
+The core of the simulation happens in the Vehicle class's `drive()` method:
+
+```cpp
+// Vehicle_Student.cpp
+void Vehicle::drive() {
+    // print id of the current thread
+    std::cout << "Vehicle #" << _id << "::drive: thread id = " 
+              << std::this_thread::get_id() << std::endl;
+
+    // initialize variables
+    bool hasEnteredIntersection = false;
+    double cycleDuration = 1; // duration of a single simulation cycle in ms
+    std::chrono::time_point<std::chrono::system_clock> lastUpdate;
+
+    // init stop watch
+    lastUpdate = std::chrono::system_clock::now();
+    while (true) {
+        // sleep to reduce CPU usage
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+        // compute time difference to stop watch
+        long timeSinceLastUpdate = std::chrono::duration_cast<std::chrono::milliseconds>
+            (std::chrono::system_clock::now() - lastUpdate).count();
+
+        if (timeSinceLastUpdate >= cycleDuration) {
+            // update position with constant velocity model
+            _posStreet += _speed * timeSinceLastUpdate / 1000;
+            
+            // ... position updates and intersection handling ...
+        }
+    }
+}
+```
+
+1. **Thread Management**: Each vehicle runs in its own thread, with the base class `TrafficObject` managing thread lifecycles.
+
+2. **CPU Load Management**: To prevent excessive CPU usage, each vehicle thread includes a small sleep:
+```cpp
+std::this_thread::sleep_for(std::chrono::milliseconds(1));
+```
+
+3. **Smart Pointer Usage**: The project uses modern C++ shared pointers instead of raw pointers:
+```cpp
+std::vector<std::shared_ptr<Street>> streets;
+std::vector<std::shared_ptr<Intersection>> intersections;
+std::vector<std::shared_ptr<Vehicle>> vehicles;
+```
+
+4. **Vehicle Movement**: Vehicles move along streets using a constant velocity model, with speed adjustments near intersections:
+```cpp
+// Slow down when approaching intersection
+if (completion >= 0.9 && !hasEnteredIntersection) {
+    _speed /= 10.0;
+    hasEnteredIntersection = true;
+}
+```
+
+**Performance Considerations**
+
+- Vehicle speed is set to 400 m/s for demonstration purposes
+- The number of vehicles should not exceed the number of available streets/intersections
+- Thread synchronization is crucial for proper simulation behavior
+- CPU usage is managed through strategic thread sleeping
+
+The simulation visualizes vehicles as circles moving along streets, with intersections marked as green dots on a city map background.
+
+
+
+<img src="assets/CleanShot 2024-12-28 at 18.46.21@2x.png" alt="CleanShot 2024-12-28 at 18.46.21@2x" style="zoom:50%;" />
 
 
 
