@@ -1501,29 +1501,587 @@ The simulation visualizes vehicles as circles moving along streets, with interse
 
 # 2. Passing Data Between Threads
 
-
-
 ## Introduction
 
+### 概览
 
+1. **Promise 和 Future 机制**
+   - 这是线程间的私有通信通道
+   - 只能使用一次
+   - 可以在线程创建后的任意时刻使用
+   - 用于在工作线程和父线程之间传递数据和异常
 
+2. **线程(Thread)与任务(Task)的区别**
+   - Task 是更高层级的抽象
+   - 系统可以自动决定是并行还是同步执行
+   - 使用 Task 可以更容易地建立 Promise-Future 链接
+   - 比标准线程需要的代码更少
 
+3. **数据传递机制**
+   - 按值传递（making copies）
+   - 移动语义（move semantics）
+     - C++11 引入的特性
+     - 避免不必要的数据复制
+     - 比传引用更安全
+
+4. **并发编程中的问题**
+   - 数据竞争（data races）
+     - 并发编程中的主要错误来源
+     - 发生在多个线程同时访问同一内存位置时
+
+### 术语解释
+
+1. **并发编程相关**
+   - `Thread`（线程）：程序中可以并行执行的最小单位
+   - `Barrier`（屏障）：用于同步多个线程的机制
+   - `Promise`：发送端的对象，用于设置值或异常
+   - `Future`：接收端的对象，用于获取值或异常
+   - `Task`：高级抽象的并行执行单元
+
+2. **C++ 特性相关**
+   - `Move Semantics`（移动语义）：
+     - C++11 引入的重要特性
+     - 通过转移资源所有权来避免不必要的复制
+     - 提高性能和资源利用效率
+   
+3. **并发问题相关**
+   - `Data Race`（数据竞争）：
+     - 多个线程同时访问共享数据
+     - 至少有一个线程进行写操作
+     - 没有同步机制保护的情况
+
+该部分将重点关注：
+1. 线程创建后的数据传递
+2. 高级并发概念（Promise/Future）
+3. 安全的数据传递方式
+4. 并发问题的处理
+
+这节课的内容对于理解现代 C++ 并发编程非常重要，特别是移动语义和 Promise/Future 机制的使用，这些都是构建高效且安全的并发程序的基础。
 
 
 
 ## Promises and Futures
 
+### Introduction
+
+1. **背景问题**：
+    - 之前学习的内容主要是关于在**线程启动阶段**向线程传递数据。
+    - 例如：
+        - 使用 **Lambda 函数** 的捕获方式（capture options）传递数据。
+        - 使用 **可变参数模板（variadic templates）** 传递数据。
+    - 局限性:
+        - 这些方法只能实现数据从父线程（如主线程 `main`）流向工作线程（worker thread）。
+        - 无法实现数据从工作线程返回到父线程。
+2. **新的需求**：
+    - 本节课的目标是研究如何实现**数据从工作线程传回父线程**。
+    - 例如，从工作线程将数据或异常返回给主线程（`main` 函数）。
+3. **Promise 和 Future 机制**：
+    - **Promise** 和 **Future** 是 C++ 提供的一种机制，用于在线程之间创建一个**单次使用的通信通道**。
+    - Promise是通道的发送端：
+        - 工作线程通过 Promise 发送数据或异常。
+    - Future是通道的接收端：
+        - 父线程通过 Future 接收数据或异常。
+4. **Promise 和 Future 的作用**：
+    - 通过这种机制，父线程可以在工作线程执行完成后，获取工作线程的结果（数据或异常）。
+    - 这种机制为线程间的通信提供了更灵活、更安全的方式。
 
 
 
+### The promise - future communication channel
 
+The methods for passing data to a thread we have discussed so far are both useful during thread construction: We can **either pass arguments to the thread function using variadic templates** or we can **use a Lambda to capture arguments by value or by reference.** The following example illustrates the use of these methods again:
 
+```cpp
+#include <iostream>
+#include <thread>
+
+void printMessage(std::string message)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(10)); // simulate work
+    std::cout << "Thread 1: " << message << std::endl;
+}
+
+int main()
+{
+    // define message
+    std::string message = "My Message";
+
+    // start thread using variadic templates
+    std::thread t1(printMessage, message);
+
+    // start thread using a Lambda
+    std::thread t2([message] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10)); // simulate work
+        std::cout << "Thread 2: " << message << std::endl;
+    });
+
+    // thread barrier
+    t1.join();
+    t2.join();
+
+    return 0;
+}
+```
+
+A **drawback** of these two approaches is that the **information flows from the parent thread (`main`) to the worker threads** (`t1` and `t2`). In this section, **we want to look at a way to pass data in the opposite direction** - that is from the worker threads back to the parent thread.
+
+**In order to achieve this**, the threads need to **adhere to a strict synchronization protocol.** There is such a mechanism available in the C++ standard that we can use for this purpose. This mechanism acts as a **single-use channel between the threads**. The **sending** end of the **channel** is called "**promise**" while the **receiving** end is called "**future**".
+
+In the C++ standard, the class template `std::promise` provides a convenient way to store a value or an exception that will acquired asynchronously at a later time via a `std::future` object. Each `std::promise` object is meant to be used **only a single time.**
+
+In the following example, we want to declare a promise which allows for transmitting a string between two threads and modifying it in the process.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+
+void modifyMessage(std::promise<std::string> && prms, std::string message)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(4000)); // simulate work
+    std::string modifiedMessage = message + " has been modified"; 
+    prms.set_value(modifiedMessage);
+}
+
+int main()
+{
+    // define message
+    std::string messageToThread = "My Message";
+
+    // create promise and future
+    std::promise<std::string> prms;
+    std::future<std::string> ftr = prms.get_future();
+
+    // start thread and pass promise as argument
+    std::thread t(modifyMessage, std::move(prms), messageToThread);
+
+    // print original message to console
+    std::cout << "Original message from main(): " << messageToThread << std::endl;
+
+    // retrieve modified message via future and print to console
+    std::string messageFromThread = ftr.get();
+    std::cout << "Modified message from thread(): " << messageFromThread << std::endl;
+
+    // thread barrier
+    t.join();
+
+    return 0;
+}
+
+```
+
+After defining a message, we have to create a suitable promise that can take a string object. **To obtain the corresponding future, we need to call the method `get_future()`** on the promise. Promise and future are the two types of the communication channel we want to use to pass a string between threads. The communication channel set up in this manner can only pass a string.
+
+We can now create a thread that takes a function and we will pass it the promise as an argument as well as the message to be modified. **Promises can not be copied and wish to own by worker thread**, because the promise-future concept is a two-point communication channel for one-time use. Therefore, we must **pass the promise to the thread function using `std::move` which transfer promise to rvalue reference**. The thread will then, during its execution, use the promise to pass back the modified message.
+
+The **thread function** takes the promise as an **rvalue reference** in accordance with move semantics. After waiting for several seconds, the message is modified and the method `set_value()` is called on the promise.
+
+Back in the main thread, after starting the thread, the original message is printed to the console. **Then, we start listening on the other end of the communication channel by calling the function `get()` on the future**. **This method will block until data is available** - which happens as soon as set_value has been called on the promise (from the thread). **If the result is movable (which is the case for `std::string`), it will be moved - otherwise it will be copied instead**. After the data has been received (with a considerable delay), the modified message is printed to the console.
+
+```
+Original message from main(): My Message
+Modified message from thread(): My Message has been modified
+```
+
+It is also possible that the worker value calls **set_value on the promise** **before `get()` is called** on the future. **In this case, `get()` returns immediately without any delay**. **After `get()` has been called once, the future is no longer usable**. This makes sense as the normal mode of data exchange between promise and future works with `std::move` - and in this case, the data is no longer available in the channel after the first call to `get()`. If `get()` is called a second time, an exception is thrown.
+
+### Quiz: get() vs. wait()
+
+There are some situations where it might be interesting to separate the waiting for the content from the actual retrieving. **Futures allow us to do that using the `wait()` function. This method will block until the future is ready**. **Once it returns, it is guaranteed that data is available and we can use `get()` to retrieve it without delay.**
+
+In addition to wait, the C++ standard **also offers the method `wait_for`,** which **takes a time duration as an input** and **also waits for a result** to become available. The **method `wait_for()` will block either until the specified timeout duration has elapsed** or **the result becomes available** - whichever comes first. **The return value identifies the state of the result.**
+
+In the following example, please use the `wait_for` method to wait for the availability of a result for one second. After the time has passed (or the result is available) print the result to the console. Should the time be up without the result being available, print an error message to the console instead.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+#include <cmath>
+
+void computeSqrt(std::promise<double> &&prms, double input)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000)); // simulate work
+    double output = sqrt(input);
+    prms.set_value(output);
+}
+
+int main()
+{
+    // define input data
+    double inputData = 42.0;
+
+    // create promise and future
+    std::promise<double> prms;
+    std::future<double> ftr = prms.get_future();
+
+    // start thread and pass promise as argument
+    std::thread t(computeSqrt, std::move(prms), inputData);
+
+		// Student task STARTS here
+		auto status = ftr.wait_for(std::chrono::milliseconds(2050)); // try less 2000, you will get a timeout
+		if (status == std::future_status::ready) {
+			std::cout << ftr.get() << std::endl;
+		} else {
+			std::cout << "timeout" << std::endl;
+		}
+
+		// Student task ENDS here    
+
+    // thread barrier
+    t.join();
+
+    return 0;
+}
+
+```
+
+### Passing exceptions
+
+The future-promise communication channel **may also be used for passing exceptions**. To do this, **the worker thread simply sets an exception rather than a value in the promise**. In the parent thread, **the exception is then re-thrown once `get()` is called on the future.**
+
+Let us take a look at the following example to see how this mechanism works:
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+#include <cmath>
+#include <memory>
+
+void divideByNumber(std::promise<double> &&prms, double num, double denom)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+    try
+    {
+        if (denom == 0)
+            throw std::runtime_error("Exception from thread: Division by zero!");
+        else
+            prms.set_value(num / denom);
+    }
+    catch (...)
+    {
+        prms.set_exception(std::current_exception());
+    }
+}
+
+int main()
+{
+    // create promise and future
+    std::promise<double> prms;
+    std::future<double> ftr = prms.get_future();
+
+    // start thread and pass promise as argument
+    double num = 42.0, denom = 0.0;
+    std::thread t(divideByNumber, std::move(prms), num, denom);
+
+    // retrieve result within try-catch-block
+    try
+    {
+        double result = ftr.get();
+        std::cout << "Result = " << result << std::endl;
+    }
+    catch (std::runtime_error e)
+    {
+        std::cout << e.what() << std::endl;
+    }
+
+    // thread barrier
+    t.join();
+
+    return 0;
+}
+
+```
+
+**In the thread function**, we **need to implement a try-catch block** which can be set to catch a particular exception or - **as in our case - to catch all exceptions**. **Instead of setting a value, we now want to throw a `std::exception` along with a customized error message**. In the **catch-block, we catch this exception and throw it to the parent thread** using the promise with `set_exception`. The function `std::current_exception` allows us to **easily retrieve the exception which has been thrown**.
+
+On the parent side, we now need to catch this exception. In order to do this, **we can use a try-block around the call to `get()`**. We can **set the catch-block to catch all exceptions** or - as in this example - **we could also catch a particular one such as the standard exception**. Calling the **method `what()` on the exception allows us to retrieve the message from the exception** - which is the one defined on the promise side of the communication channel.
+
+When we run the program, we can see that the exception is being thrown in the worker thread with the main thread printing the corresponding error message to the console.
+
+**So a promise future pair can be used to pass either values or exceptions between threads.**
+
+### Summary
+
+This section explains **how to use promises and futures** to pass strings between threads, emphasizing the importance of move semantics for efficient concurrent programming. **Move semantics, especially with rvalue references,** can greatly enhance code performance and are recommended for deeper exploration. Futures allow you to control when to **retrieve data using the `Get` functio**n, ensuring results are available at specific points in time. **However, promises and futures have two major limitations: they only allow one-way data transfer** (from worker to parent) and **are intended for single use**. **Alternatives will be discussed later**, followed by a comparison of threads and tasks in the next section.
+
+---
 
 ## Threads vs. Tasks
 
+### Introduction
+
+#### 线程（Threads）与任务（Tasks）的区别
+- **线程方式**：
+  - 使用 `std::thread`、`std::promise` 和 `std::future`
+  - 需要编写大量样板代码（boilerplate code）
+  - 管理复杂，开销较大
+
+- **任务方式**：
+  - 使用 `std::async`
+  - 代码更简洁
+  - 更高层次的抽象
+  - 系统可以自动决定执行方式
+
+#### 性能考虑
+
+1. **线程开销**
+   - 创建和管理线程有显著的系统开销
+   - 不是所有情况下使用线程都能提升性能
+   - 有时过多的线程反而会降低运行时性能
+
+2. **任务的优势**
+   - 更灵活的执行模型
+   - 减少了手动线程管理的复杂性
+   - 系统可以优化执行策略
+
+#### 实际应用建议
+
+1. **使用 `std::async` 的场景**
+   - 当需要从工作线程返回数据或异常时
+   - 需要简单快速的并行处理时
+   - 不需要精细控制线程行为时
+
+2. **使用 `std::thread` 的场景**
+   - 需要更细粒度的线程控制时
+   - 特定的线程同步需求时
+   - 复杂的线程交互场景
+
+### Starting threads with async
+
+In the last section we have seen how data can be passed from a worker thread to the parent thread using promises and futures. A **disadvantage** of the **promise-future** approach however is that it is very **cumbersome** (and involves a lot of **boilerplate code**) to pass the promise to the thread function using an rvalue reference and `std::move`. **For** the straight-forward **task** of returning data or exceptions **from a worker thread to the parent thread** however, there is a **simpler** and more convenient way using **`std::async()`** instead of `std::thread()`.
+
+Let us adapt the code example from the last section to use `std::async`:
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+#include <cmath>
+#include <memory>
+
+double divideByNumber(double num, double denom)
+{
+    std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+
+    if (denom == 0)
+        throw std::runtime_error("Exception from thread: Division by zero!");
+
+    return num / denom;
+}
+
+
+int main()
+{
+    // use async to start a task
+    double num = 42.0, denom = 2.0;
+    std::future<double> ftr = std::async(divideByNumber, num, denom);
+
+    // retrieve result within try-catch-block
+    try
+    {
+        double result = ftr.get();
+        std::cout << "Result = " << result << std::endl;
+    }
+    catch (std::runtime_error e)
+    {
+        std::cout << e.what() << std::endl;
+    }
+
+    return 0;
+}
+```
+
+The first change we are making is in the thread function: We are **removing the promise from the argument list as well as the try-catch block.** Also, the **return type of the function is changed from void to double** as the result of the computation will be channeled back to the main thread using a simple return. After these changes, the function has no knowledge of threads, nor of futures or promises - **it is a simple function that takes two doubles as arguments and returns a double as a result.** Also, **it will throw an exception when a division by zero is attempted.**
+
+In the main thread, we need to **replace the call to `std::thread` with `std::async`**. Note that **async returns a future**, which we will **use later in the code to retrieve the value** that is returned by the function. A promise, as with `std::thread`, is no longer needed, so the code becomes much shorter. In the try-catch block, nothing has changed - we are still calling `get()` on the future in the try-block and exception-handling happens unaltered in the catch-block. **Also, we do not need to call `join()` any more.** With `async`, **the thread destructor will be called automatically** - which reduces the risk of a concurrency bug.
+
+When we execute the code in the previous example, the output is identical to before, so we **seemingly have the same functionality as before** - or do we? When we use the `std::this_thread::get_id()` to print the system thread ids of the main and of the worker thread, we get the following command line output:
+
+![image_0](assets/image_0.png)
+
+As expected, the **ids between the two threads differ from each other** - **they are running in parallel**. **However, one of the major differences between `std::thread` and `std::async` is that with the latter**, **the system decides wether the associated function should be run asynchronously or synchronously**. **By adjusting the launch parameters of `std::async` manually, we can directly influence wether the associated thread function will be executed synchronously or asynchronously.**
+
+The line
+
+```cpp
+    std::future<double> ftr = std::async(std::launch::deferred, divideByNumber, num, denom);
+```
+
+enforces the **synchronous** execution of `divideByNumber`, which results in the following output, where the thread ids for main and worker thread are identical.
+
+<img src="assets/image_1.png" alt="image_1" style="zoom:50%;" />
+
+If we were to use the launch option "**async**" instead of "**deferred**", we would enforce an asynchronous execution whereas the option "**any**" would **leave it to the system to decide** - which is the default.
+
+At this point, let us compare `std::thread` with `std::async`: **Internally**, `std::async` creates a promise, gets a future from it and runs a template function that takes the promise, calls our function and then either sets the value or the exception of that promise - depending on function behavior. **The code used internally by `std::async` is more or less identical to the code we used in the previous example**, except that this time it has been generated by the compiler and it is hidden from us - which means that the code we write appears much cleaner and leaner. Also, **`std::async` makes it possible to control the amount of concurrency by passing an optional launch parameter,** which enforces either **synchronous or asynchronous** behavior. This ability, especially when left to the system, allows us to prevent an overload of threads, which would eventually slow down the system as threads consume resources for both management and communication. If we were to use too many threads, the increased resource consumption would outweigh the advantages of parallelism and slow down the program. By leaving the decision to the system, we can ensure that the number of threads is chosen in a carefully balanced way that optimizes runtime
+
+### Task-based concurrency
+
+**Determining the optimal number of threads to use is a hard problem**. It usually depends on the number of available cores wether it makes sense to execute code as a thread or in a sequential manner. The use of **`std::async` (and thus tasks)** **take the burden of this decision away from the user** and **let the system decide wether to execute the code sequentially or as a thread**. With **tasks**, the programmer decides what CAN be run in parallel in principle and the system then decides at runtime what WILL be run in parallel.
+
+**Internally**, this is achieved by using **thread-pools** wich represent the number of available threads based on the cores/processors as well as **by using work-stealing queues,** where tasks are re-distributed among the available processors dynamically. The following diagram shows the principal of task distribution on a multi-core system using work stealing queues.
+
+<img src="assets/C3-3-A3a-5551381.png" alt="C3-3-A3a" style="zoom:50%;" />
+
+As can be seen, the first core in the example is heavily oversubscribed with several tasks that are waiting to be executed. The other cores however are running idle. **The idea of a work-stealing queue is to have a watchdog program running in the background that regularly monitors the amount of work performed by each processor and redistributes it as needed.** For the above example this would mean that tasks waiting for execution on the first core would be shifted (or "stolen") from busy cores and added to available free cores such that idle time is reduced. After this rearranging procedire, the task distribution in our example could look as shown in the following diagram.
+
+![C3-3-A3b](assets/C3-3-A3b-5551393.png)
+
+**A work distribution in this manner can only work, when parallelism is explicitly described in the program by the programmer. If this is not the case, work-stealing will not perform effectively.**
+
+To conclude this section, a general **comparison** of task-based and thread-based programming is given in the following:
+
+- With **tasks**
+    - the **system takes care** of many details (e.g. join). 
+    - Tasks on the other hand are more **light-weight** as they will be using a pool of already created threads (the "**thread pool**").
+
+- With **threads**
+    - the **programmer is responsible** for many details. 
+    - As far as resources go, threads are usually more **heavy-weight** as they are generated by the operating system (OS). It takes time for the OS to be called and to allocate memory / stack / kernel data structures for the thread. Also, destroying the thread is expensive. 
+
+**Threads** and **tasks** are used for different problems. 
+
+| **场景类型**   | **任务（Tasks）使用场景**                                    | **线程（Threads）使用场景**                                  |
+| -------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
+| **计算处理**   | • 大数据并行计算<br>• 图像处理<br>• 科学计算<br>• 批量数据转换 | • 需要精确控制执行顺序的计算<br>• 实时计算处理<br>• 持续性的数据处理 |
+| **I/O 操作**   | • 短期的异步文件读写<br>• 并发 API 调用<br>• 快速数据库查询  | • 长连接网络通信<br>• 持续性文件监控<br>• 阻塞式 I/O 操作    |
+| **用户交互**   | • UI 事件处理<br>• 短期后台任务<br>• 动画渲染                | • 用户输入监听<br>• 后台服务进程<br>• 实时数据更新           |
+| **服务端应用** | • HTTP 请求处理<br>• 微服务调用<br>• 快速数据缓存            | • WebSocket 连接<br>• 数据库连接池<br>• 消息队列处理         |
+| **系统服务**   | • 定时任务执行<br>• 系统状态检查<br>• 配置更新               | • 守护进程<br>• 系统监控<br>• 日志记录服务                   |
+| **资源管理**   | • 内存池操作<br>• 临时资源分配<br>• 缓存管理                 | • 持久连接管理<br>• 设备监控<br>• 资源锁控制                 |
+| **并发控制**   | • 自动负载均衡<br>• 动态任务调度<br>• 并行计算加速           | • 手动线程同步<br>• 临界区控制<br>• 死锁预防                 |
+| **实时处理**   | • 快速响应事件<br>• 实时数据分析<br>• 即时计算               | • 实时数据流处理<br>• 传感器数据采集<br>• 持续性监控         |
+
+选择建议：
+
+1. **选择任务（Tasks）当：**
+   - 需要快速完成的并行操作
+   - 任务之间相对独立
+   - 不需要复杂的线程控制
+   - 系统资源有限
+
+2. **选择线程（Threads）当：**
+   - 需要长期运行的操作
+   - 需要精细的线程控制
+   - 处理阻塞式操作
+   - 需要自定义线程行为
+
+### Assessing the advantage of parallel execution
+
+In this section, we want to explore the **influence of the number of threads** on the performance of a program with respect to its **overall runtime**. The example below has a thread function called "workerThread" which contains a loop with an adjustable number of cycles in which a mathematical operation is performed.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+#include <cmath>
+#include <vector>
+#include <chrono>
+
+void workerFunction(int n)
+{
+    // print system id of worker thread
+    std::cout << "Worker thread id = " << std::this_thread::get_id() << std::endl;
+
+    // perform work
+    for (int i = 0; i < n; ++i)
+    {
+        sqrt(12345.6789);
+    }
+}
+
+int main()
+{
+    // print system id of worker thread
+    std::cout << "Main thread id = " << std::this_thread::get_id() << std::endl;
+
+    // start time measurement
+    std::chrono::high_resolution_clock::time_point t1 = std::chrono::high_resolution_clock::now();
+    
+    // launch various tasks
+    std::vector<std::future<void>> futures;
+    int nLoops = 10, nThreads = 5;
+    for (int i = 0; i < nThreads; ++i)
+    {
+        futures.emplace_back(std::async(workerFunction, nLoops));
+    }
+
+    // wait for tasks to complete
+    for (const std::future<void> &ftr : futures)
+        ftr.wait();
+
+    // stop time measurement and print execution time
+    std::chrono::high_resolution_clock::time_point t2 = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>( t2 - t1 ).count();
+    std::cout << "Execution finished after " << duration <<" microseconds" << std::endl;
+    
+    return 0;
+}
+```
+
+In `main()`, a for-loop starts a configurable number of tasks that can either be executed synchronously or asynchronously. As an experiment, we will now use a number of different parameter settings to execute the program and evaluate the time it takes to finish the computations. The idea is to gauge the effect of the number of threads on the overall runtime:
+
+1. int nLoops = 1e7 , nThreads = 4 , std::launch::async
+
+    ![image_2](assets/image_2.png)
+
+    - **描述**：在 4 个线程中并行计算 10,000,000 次平方根。
+    - **结果**：总运行时间约为 45 毫秒。
+    - 分析：
+        - 使用 `std::launch::async`，任务以异步方式运行，线程间并行执行。
+        - 并行执行显著加快了计算速度，充分利用了 4 核处理器的性能。
+
+2. int nLoops = 1e7 , nThreads = 5 , std::launch::deferred
+
+    ![image_3](assets/image_3-5571053.png)
+
+    - **描述**：在 5 个线程中顺序计算 10,000,000 次平方根。
+    - **结果**：总运行时间约为 126 毫秒。
+    - 分析：
+        - 使用 `std::launch::deferred`，任务按顺序执行，未利用多核并行能力。
+        - 与设置 1 相比，运行时间显著增加，但仍然是合理的，因为任务是顺序执行的。
+
+3. int nLoops = 10 , nThreads = 5 , std::launch::async
+
+    ![image_4](assets/image_4.png)
+
+    - **描述**：在 5 个线程中并行计算 10 次平方根。
+    - **结果**：总运行时间约为 3 毫秒。
+    - 分析：
+        - 尽管任务以异步方式运行，但计算量很小，线程管理的开销（如线程启动和切换）占据了较大比例。
+        - 总体运行时间较短，但并行化的优势不明显。
+
+4. int nLoops = 10 , nThreads = 5 , std::launch::deferred
+
+    ![image_5](assets/image_5-5571228.png)
+
+    - **描述**：在 5 个线程中顺序计算 10 次平方根。
+    - **结果**：总运行时间约为 0.01 毫秒。
+    - 分析：
+        - 使用 `std::launch::deferred`，任务按顺序执行，避免了线程管理的开销。
+        - 由于计算量极小，顺序执行的效率更高。
+
+    ### **5. 关键结论**
+
+    - **并行化的优劣**：并行执行（异步模式）并不总是更快。对于小任务，线程管理的开销可能超过计算本身的时间。
+    - 任务量与线程数量的平衡：
+        - 对于计算量大的任务（如设置 1 和 2），并行化可以显著提高效率。
+        - 对于计算量小的任务（如设置 3 和 4），顺序执行可能更高效。
+    - **硬件限制**：并行化的速度提升受限于硬件（如 CPU 核心数）。在多核机器上，线程数超过核心数可能导致性能下降。
+
+### Summary
+
+The text discusses the choice between using `std::thread` and `std::async` in C++ for managing threads. Generally, `std::async` is simpler and requires less boilerplate code, as it eliminates the need for explicitly calling `join` or managing promises. It provides a future per task, which can handle data exchange, parsing exceptions, and act as a barrier. However, `std::thread` offers finer control in certain situations, making it preferable for more complex tasks. Bjarne Stroustrup, the creator of C++, emphasizes that `std::async` is designed for simplicity and common cases, **while `std::thread` is better suited for complex scenarios involving I/O, mutexes, or thread interactions.** The text concludes by hinting at the challenges of data races in concurrent programming.
 
 
 
+
+
+
+
+---
 
 ## Avoiding Data Races
 
