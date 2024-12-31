@@ -2063,13 +2063,14 @@ In `main()`, a for-loop starts a configurable number of tasks that can either be
         - 使用 `std::launch::deferred`，任务按顺序执行，避免了线程管理的开销。
         - 由于计算量极小，顺序执行的效率更高。
 
-    ### **5. 关键结论**
 
-    - **并行化的优劣**：并行执行（异步模式）并不总是更快。对于小任务，线程管理的开销可能超过计算本身的时间。
-    - 任务量与线程数量的平衡：
-        - 对于计算量大的任务（如设置 1 和 2），并行化可以显著提高效率。
-        - 对于计算量小的任务（如设置 3 和 4），顺序执行可能更高效。
-    - **硬件限制**：并行化的速度提升受限于硬件（如 CPU 核心数）。在多核机器上，线程数超过核心数可能导致性能下降。
+5. 关键结论
+
+- **并行化的优劣**：并行执行（异步模式）并不总是更快。对于小任务，线程管理的开销可能超过计算本身的时间。
+- 任务量与线程数量的平衡：
+    - 对于计算量大的任务（如设置 1 和 2），并行化可以显著提高效率。
+    - 对于计算量小的任务（如设置 3 和 4），顺序执行可能更高效。
+- **硬件限制**：并行化的速度提升受限于硬件（如 CPU 核心数）。在多核机器上，线程数超过核心数可能导致性能下降。
 
 ### Summary
 
@@ -2077,21 +2078,554 @@ The text discusses the choice between using `std::thread` and `std::async` in C+
 
 
 
-
-
-
-
 ---
 
 ## Avoiding Data Races
 
+### Introduction
+
+#### 1. 数据竞争的定义与危害
+
+**数据竞争的定义：**
+
+- 当两个或多个并发线程同时访问同一内存位置
+- 其中至少有一个线程在进行写操作
+- 这些访问没有进行proper同步
+
+#### 2. 避免数据竞争的策略
+
+1. **重写拷贝构造函数**
+   - 确保正确实现深拷贝
+   - 避免多个线程共享同一数据结构
+
+2. **使用移动语义**
+   - 安全地转移资源所有权
+   - 减少数据共享和复制开销
+
+#### 3. 为什么数据竞争特别危险？
+
+1. **难以检测**
+   - 问题可能间歇性出现
+   - 依赖于系统调度的时序
+   - 在开发环境可能无法重现
+
+2. **安全隐患**
+   - 可能导致敏感数据泄露
+   - 系统行为不可预测
+   - 可能产生安全漏洞
+
+3. **调试挑战**
+   - 问题不容易重现
+   - 传统调试方法可能无效
+   - 需要特殊的并发调试工具
+
+#### 4. 最佳实践建议
+
+1. **设计阶段**
+   - 仔细规划并发访问模式
+   - 明确定义资源所有权
+   - 选择适当的同步机制
+
+2. **实现阶段**
+   - 使用适当的同步原语
+   - 实现正确的深拷贝
+   - 合理使用移动语义
+
+3. **测试阶段**
+   - 进行并发压力测试
+   - 使用专门的数据竞争检测工具
+   - 模拟各种并发场景
 
 
 
+### Understanding data races
+
+One of the primary sources of error in concurrent programming are data races. They occur, when two concurrent threads are accessing the same memory location while at least one of them is modifying (the other thread might be reading or modifying). In this scenario, the value at the memory location is completely undefined. Depending on the system scheduler, the second thread will be executed at an unknown point in time and thus see different data at the memory location with each execution. Depending on the type of program, the result might be anything from a crash to a security breach when data is read by a thread that was not meant to be read, such as a user password or other sensitive information. **Such an error is called a "data race" because two threads are racing to get access to a memory location first, with the content at the memory location depending on the result of the race.**
+
+The following diagram illustrates the principle: One thread wants to increment a variable `x`, whereas the other thread wants to print the same variable. Depending on the timing of the program and thus the order of execution, the printed result might change each time the program is executed.
+
+![C3-4-A2](assets/C3-4-A2-5573131.png)
+
+In this example, **one safe way** of passing data to a thread would be to carefully synchronize the two threads using **either `join()` or the promise-future concept** that can guarantee the availability of a result. Data races are always to be avoided. Even if nothing bad seems to happen, they are a bug and should always be treated as such. Another possible solution for the above example would be to **make a copy of the original argument** and **pass the copy to the thread**, thereby preventing the data race.
+
+### Passing data to a thread by value
+
+In the following example, an instance of the proprietary class `Vehicle` is created and passed to a thread **by value**, thus making a copy of it.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+
+class Vehicle
+{
+public:
+    //default constructor
+    Vehicle() : _id(0)
+    {
+        std::cout << "Vehicle #" << _id << " Default constructor called" << std::endl;
+    }
+
+    //initializing constructor
+    Vehicle(int id) : _id(id)
+    {
+        std::cout << "Vehicle #" << _id << " Initializing constructor called" << std::endl;
+    }
+
+    // setter and getter
+    void setID(int id) { _id = id; }
+    int getID() { return _id; }
+
+private:
+    int _id;
+};
+
+int main()
+{
+    // create instances of class Vehicle
+    Vehicle v0; // default constructor
+    Vehicle v1(1); // initializing constructor
+
+    // read and write name in different threads (which one of the above creates a data race?)
+    std::future<void> ftr = std::async([](Vehicle v) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+        v.setID(2);
+    }, v0);
+
+    v0.setID(3);
+
+    ftr.wait();
+    std::cout << "Vehicle #" << v0.getID() << std::endl;
+
+    return 0;
+}
+```
+
+Note that the class Vehicle has a default constructor and an initializing constructor. In the main function, when the instances `v0` and `v1` are created, each constructor is called respectively. Note that `v0` is passed by value to a Lambda, which serves as the thread function for `std::async`. Within the Lambda, the id of the Vehicle object is changed from the default (which is 0) to a new value 2. Note that the thread execution is paused for 500 milliseconds to guarantee that the change is performed well after the main thread has proceeded with its execution.
+
+In the `main` thread, immediately after starting up the worker thread, the id of `v0` is changed to 3. Then, after waiting for the completion of the thread, the vehicle id is printed to the console. In this program, the output will always be the following:
+
+![image](assets/image.png)
+
+**Passing data to a thread in this way is a clean and safe method as there is no danger of a data race** - **at least when atomic data** types such as integers, doubles, chars or booleans are passed.
+
+**When passing a complex data structure** however, there are **sometimes pointer variables hidden within, that point to a (potentially) shared data buffer** - **which might cause a data race** even though the programmer believes that the copied data will effectively preempt this. The next example illustrates this case by adding a new member variable to the `Vehicle` class, which is a pointer to a string object, as well as the corresponding getter and setter functions.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+
+class Vehicle
+{
+public:
+    //default constructor
+    Vehicle() : _id(0), _name(new std::string("Default Name"))
+    {
+        std::cout << "Vehicle #" << _id << " Default constructor called" << std::endl;
+    }
+
+    //initializing constructor
+    Vehicle(int id, std::string name) : _id(id), _name(new std::string(name))
+    {
+        std::cout << "Vehicle #" << _id << " Initializing constructor called" << std::endl;
+    }
+
+    // setter and getter
+    void setID(int id) { _id = id; }
+    int getID() { return _id; }
+    void setName(std::string name) { *_name = name; }
+    std::string getName() { return *_name; }
+
+private:
+    int _id;
+    std::string *_name;
+};
+
+int main()
+{
+    // create instances of class Vehicle
+    Vehicle v0;    // default constructor
+    Vehicle v1(1, "Vehicle 1"); // initializing constructor
+
+    // launch a thread that modifies the Vehicle name
+    std::future<void> ftr = std::async([](Vehicle v) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+        v.setName("Vehicle 2");
+    },v0);
+
+    v0.setName("Vehicle 3");
+
+    ftr.wait();
+    std::cout << v0.getName() << std::endl;
+
+    return 0;
+}
+```
+
+The output of the program looks like this:
+
+![image_1](assets/image_1-5573273.png)
+
+The basic program structure is mostly identical to the previous example with the object `v0` being copied by value when passed to the thread function. This time however, even though a copy has been made, the original object `v0` is modified, when the thread function sets the new name. This happens because the member `_name` is a pointer to a string and after copying, **even though the pointer variable has been duplicated, it still points to the same location as its value** (i.e. the memory location) has not changed. Note that when the delay is removed in the thread function, **the console output varies between "Vehicle 2" and "Vehicle 3", depending on the system scheduler. **Such an error might go unnoticed for a long time. It could show itself well after a program has been shipped to the client - which is what makes this error type so treacherous.**
+
+Classes from the standard template library usually implement a deep copy behavior by default (such as `std::vector`). **When dealing with proprietary data types, this is not guaranteed.** **The only safe way to tell whether a data structure can be safely passed is by looking at its implementation**:
+
+![CleanShot 2024-12-31 at 13.10.55@2x](assets/CleanShot 2024-12-31 at 13.10.55@2x.png)
+
+**Unfortunately**, one of the primary concepts of **object-oriented programming** - information hiding - **often prevents us from looking at the implementation details of a class** - we can only see the interface, which does not tell us what we need to know to make sure that an object of the class may be safely passed by value.
+
+### Overwriting the copy constructor
+
+The problem with passing a proprietary class is that the standard copy constructor makes a 1:1 copy of all data members, including pointers to objects. This behavior is also referred to as "shallow copy". In the above example we would have liked (and maybe expected) a "deep copy" of the object though, i.e. a copy of the data to which the pointer refers. A solution to this problem is to create a proprietary copy constructor in the class `Vehicle`. The following piece of code overwrites the default copy constructor and can be modified to make a customized copy of the data members.
+
+<img src="assets/CleanShot 2024-12-31 at 13.16.47@2x.png" alt="CleanShot 2024-12-31 at 13.16.47@2x" style="zoom:50%;" />
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+
+class Vehicle
+{
+public:
+    //default constructor
+    Vehicle() : _id(0), _name(new std::string("Default Name"))
+    {
+        std::cout << "Vehicle #" << _id << " Default constructor called" << std::endl;
+    }
+
+    //initializing constructor
+    Vehicle(int id, std::string name) : _id(id), _name(new std::string(name))
+    {
+        std::cout << "Vehicle #" << _id << " Initializing constructor called" << std::endl;
+    }
+
+    // copy constructor 
+    Vehicle(const Vehicle &src)
+    {
+        _id = src._id;
+        if (src._name != nullptr) {
+            // QUIZ: Student code STARTS here
+            _name = new std::string;
+            *_name = *src._name;
+        }
+        std::cout << "Vehicle #" << _id << " Copy constructor called" << std::endl;
+    }
+
+    // setter and getter
+    void setID(int id) { _id = id; }
+    int getID() { return _id; }
+    void setName(std::string name) { *_name = name; }
+    std::string getName() { return *_name; }
+
+private:
+    int _id;
+    std::string *_name;
+};
+
+int main()
+{
+    // create instances of class Vehicle
+    Vehicle v0;    // default constructor
+    Vehicle v1(1, "Vehicle 1"); // initializing constructor
+
+    // launch a thread that modifies the Vehicle name
+    std::future<void> ftr = std::async([](Vehicle v) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500)); // simulate work
+        v.setName("Vehicle 2");
+    },v0);
+
+    v0.setName("Vehicle 3");
+
+    ftr.wait();
+    std::cout << v0.getName() << std::endl;
+
+    return 0;
+}
+
+```
 
 
+
+### Passing data using move semantics
+
+**Even though a customized copy constructor can help us to avoid data races, it is also time (and memory) consuming**. In the following, we will **use move semantics to implement a more effective way** of safely passing data to a thread.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+
+class Vehicle
+{
+public:
+    //default constructor
+    Vehicle() : _id(0), _name(new std::string("Default Name"))
+    {
+        std::cout << "Vehicle #" << _id << " Default constructor called" << std::endl;
+    }
+
+    //initializing constructor
+    Vehicle(int id, std::string name) : _id(id), _name(new std::string(name))
+    {
+        std::cout << "Vehicle #" << _id << " Initializing constructor called" << std::endl;
+    }
+
+    // copy constructor 
+    Vehicle(Vehicle const &src)
+    {
+        //...
+        std::cout << "Vehicle #" << _id << " copy constructor called" << std::endl;
+    };
+
+    // move constructor 
+    Vehicle(Vehicle && src)
+    {
+        _id = src.getID();
+        _name = new std::string(src.getName());
+
+        src.setID(0);
+        src.setName("Default Name");
+
+        std::cout << "Vehicle #" << _id << " move constructor called" << std::endl;
+    };
+
+    // setter and getter
+    void setID(int id) { _id = id; }
+    int getID() { return _id; }
+    void setName(std::string name) { *_name = name; }
+    std::string getName() { return *_name; }
+
+private:
+    int _id;
+    std::string *_name;
+};
+
+int main()
+{
+    // create instances of class Vehicle
+    Vehicle v0;    // default constructor
+    Vehicle v1(1, "Vehicle 1"); // initializing constructor
+
+    // launch a thread that modifies the Vehicle name
+    std::future<void> ftr = std::async([](Vehicle v) {
+        v.setName("Vehicle 2");
+    },std::move(v0));
+
+    ftr.wait();
+    std::cout << v0.getName() << std::endl;
+
+    return 0;
+}
+```
+
+
+
+**A move constructor enables the resources owned by an rvalue object to be moved into an lvalue without physically copying it.** **Rvalue references support the implementation of move semantics**, which enables the programmer to write code that transfers resources (such as dynamically allocated memory) from one object to another.
+
+To make use of move semantics, we need to provide a move constructor (and optionally a move assignment operator). Copy and assignment operations whose sources are rvalues automatically take advantage of move semantics. **Unlike the default copy constructor however, the compiler does not provide a default move constructor.**
+
+To define a move constructor for a C++ class, the following steps are required:
+
+1. Define an empty constructor method that takes an rvalue reference to the class type as its parameter
+
+    ![C3-4-A5a](assets/C3-4-A5a-5573404.png)
+
+2. In the move constructor, **assign the class data members from the source object** to the object that is being constructed
+
+    ![C3-4-A5b](assets/C3-4-A5b-5573416.png)
+
+3. **Assign the data members of the source object to default values.**
+
+    ![C3-4-A5c](assets/C3-4-A5c-5573425.png)
+
+When launching the thread, the **Vehicle object `v0` can be passed using `std::move()` - which calls the move constructor and invalidates the original object `v0` in the main thread.**
+
+### Move semantics and uniqueness
+
+As with the above-mentioned copy constructor, **passing by value is usually safe - provided that a deep copy is made of all the data structures within the object that is to be passed.** **With move semantics , we can additionally use the notion of uniqueness to prevent data races by default**. In the following example, a `unique_pointer` instead of a raw pointer is used for the string member in the Vehicle class.
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <future>
+#include <memory>
+
+class Vehicle
+{
+public:
+    //default constructor
+    Vehicle() : _id(0), _name(new std::string("Default Name"))
+    {
+        std::cout << "Vehicle #" << _id << " Default constructor called" << std::endl;
+    }
+
+    //initializing constructor
+    Vehicle(int id, std::string name) : _id(id), _name(new std::string(name))
+    {
+        std::cout << "Vehicle #" << _id << " Initializing constructor called" << std::endl;
+    }
+
+    // move constructor with unique pointer
+    Vehicle(Vehicle && src) : _name(std::move(src._name))
+    {
+        // move id to this and reset id in source
+        _id = src.getID();
+        src.setID(0);
+
+        std::cout << "Vehicle #" << _id << " move constructor called" << std::endl;
+    };
+
+    // setter and getter
+    void setID(int id) { _id = id; }
+    int getID() { return _id; }
+    void setName(std::string name) { *_name = name; }
+    std::string getName() { return *_name; }
+
+private:
+    int _id;
+    std::unique_ptr<std::string> _name;
+};
+
+
+int main()
+{
+    // create instances of class Vehicle
+    Vehicle v0;    // default constructor
+    Vehicle v1(1, "Vehicle 1"); // initializing constructor
+
+    // launch a thread that modifies the Vehicle name
+    std::future<void> ftr = std::async([](Vehicle v) {
+        v.setName("Vehicle 2");
+    },std::move(v0));
+
+    ftr.wait();
+    std::cout << v0.getName() << std::endl; // this will now cause an exception
+
+    return 0;
+}
+```
+
+As can be seen, the `std::string` has now been changed to a unique pointer, which means that only a single reference to the memory location it points to is allowed. Accordingly, the move constructor transfers the unique pointer to the worker by using `std::move` and thus invalidates the pointer in the `main` thread. When calling `v0.getName()`, an exception is thrown, making it clear to the programmer that accessing the data at this point is not permissible - which is the whole point of using a unique pointer here as a data race will now be effectively prevented.
+
+The point of this example has been to illustrate that move semantics on its own is not enough to avoid data races. **The key to thread safety is to use move semantics in conjunction with uniqueness**. It is the responsibility of the programmer to ensure that pointers to objects that are moved between threads are unique.
+
+### Summary
+
+![CleanShot 2024-12-31 at 13.50.58@2x](assets/CleanShot 2024-12-31 at 13.50.58@2x.png)
+
+1. **特征（Characteristics）**
+    - 罕见性质（仅在1/100次运行中出现）
+    - 隐藏性质
+    - 行为不一致性
+2. **检测方法（Detection Methods）**
+    - 使用线程延迟（std::sleep_for）
+    - 调试工具
+3. **预防策略（Prevention Strategies）**
+    - 移动语义
+    - 唯一性保证
+    - 深拷贝实现
+4. **最佳实践（Best Practices）**
+    - 保护共享数据
+    - 避免未保护的读写操作
+    - 正确的同步机制
 
 ## Exercise
+
+### Overview
+
+**Purpose**  
+
+In the traffic simulation, **vehicles now have to wait at an intersection until it is their turn to drive on**. The communication between vehicles and intersections works through a one-time communication channel.
+
+Use **promises and futures to set up the communication channel between vehicles and intersections**. Implement proper waiting mechanisms to avoid having multiple vehicles enter an intersection.
+
+### **Current Problem**
+
+- Vehicles are driving along streets and passing through intersections **without checking for other vehicles already inside the intersection.**
+- This is **unsafe and needs to be improved** by implementing a mechanism to manage vehicle entry into intersections.
+
+### **Objective**
+
+- Use **promises** and **futures** to create a communication channel between vehicles and intersections.
+- Ensure that vehicles wait at intersections until it is their turn to proceed.
+- Implement a **first-in-first-out (FIFO)** mechanism to allow vehicles to enter intersections in the order they arrive.
+
+### Program workflow
+
+![CleanShot 2025-01-01 at 01.31.49@2x](assets/CleanShot 2025-01-01 at 01.31.49@2x.png)
+
+1. **Threads for Vehicles and Intersections**:
+   - Each vehicle has its own thread that simulates its movement (`Vehicle::drive`).
+   - Each intersection also has its own thread to process the queue of vehicles waiting to enter (`Intersection::processVehicleQueue`).
+
+2. **Communication Mechanism**:
+   - When a **vehicle** approaches an intersection, it requests entry by creating a **promise**.
+   - The **intersection** manages these promises and only fulfills them when it is safe for the vehicle to enter.
+   - Once fulfilled, the vehicle proceeds through the intersection.
+
+3. **Queue Management**:
+   - Vehicles are added to a waiting queue at the intersection.
+   - The intersection processes this queue, granting entry to one vehicle at a time while ensuring no other vehicle is inside.
+
+### **Key Functionalities**
+1. **`Vehicle::drive`**:
+   - Simulates the movement of a vehicle along a street.
+   - When the vehicle reaches the end of the street, it requests entry into the intersection using `Intersection::addVehicleToQueue`.
+
+2. **`Intersection::addVehicleToQueue`**:
+   - Adds the vehicle to a waiting queue.
+   - Creates a **promise** and associates it with the vehicle.
+   - The promise is fulfilled once the intersection grants entry to the vehicle.
+
+3. **`Intersection::processVehicleQueue`**:
+   - **Continuously checks** the queue for waiting vehicles.
+   - Ensures the intersection is clear before granting entry to the first vehicle in the queue.
+   - Blocks access for other vehicles while the intersection is occupied.
+
+### **Execution Flow**
+
+1. **Main Function**:
+    - Initializes intersections, streets, and vehicles.
+    - Starts threads for intersections and vehicles.
+
+2. **Vehicle Movement**:
+    - Vehicles travel along streets and request entry into intersections.
+    - Once granted entry, they proceed through the intersection and continue their journey.
+
+3. **Intersection Processing**:
+    - Intersections continuously process their vehicle queues.
+    - Only one vehicle is allowed inside the intersection at a time.
+
+### **FIFO Principle**
+
+- Vehicles are processed in the order they arrive at the intersection.
+- This ensures fairness and avoids deadlocks or starvation.
+
+### **Tasks**
+
+- **Task L2.1** : In method `Vehicle::drive()`, start up a task using `std::async` which takes a reference to the method `Intersection::addVehicleToQueue`, the object `_currDestination` and a shared pointer to this using the `get_shared_this()` function. Then, wait for the data to be available before proceeding to slow down.
+- **Task L2.2** : In method `Intersection::addVehicleToQueue()`, add the new vehicle to the waiting line by creating a promise, a corresponding future and then adding both to `_waitingVehicles`. Then wait until the vehicle has been granted entry.
+- **Task L2.3** : In method `WaitingVehicles::permitEntryToFirstInQueue()`, get the entries from the front of `_promises` and `_vehicles`. Then, fulfill promise and send signal back that permission to enter has been granted. Finally, remove the front elements from both queues.
+
+### Build Instructions
+
+*To run this code, you will need to use the virtual desktop*. In the desktop you can use Terminator or the terminal in Visual Studio Code.
+
+Once in the virtual desktop, to compile and run the code, create a `build` directory and use `cmake` and `make` as follows:
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
+./traffic_simulation
+```
+
+### Code Walkthrough
+
+
 
 
 
