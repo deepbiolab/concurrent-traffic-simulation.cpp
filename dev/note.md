@@ -3485,17 +3485,562 @@ int main()
 
 ## Using Locks to Avoid Deadlocks
 
+在上一节中，我们使用了互斥锁（mutex）来锁定和解锁共享内存资源，**但如果解锁操作未能执行，就存在死锁的风险**。本节介绍了 `lock_guard` 的概念，这是一种对象，**在创建时会自动锁定互斥锁，并在销毁时自动解锁**，从而确保无论发生何种情况（例如异常导致程序流程被重定向），解锁操作都能执行。此外，`unique_lock` 提供了更大的灵活性，让我们可以在**需要时显式控制资源的锁定和解锁**。
+
+### Lock Guard  
+
+在前面的例子中，我们直接调用了互斥锁的 lock() 和 unlock() 函数。“在锁下工作”的概念是为了阻止其他线程对同一资源的不必要访问。只有获取了锁的线程才能解锁互斥锁，并让所有其他线程有机会获取锁。然而，在实际中，**应该尽量避免直接调用 lock()**！想象一下，当一个**线程在锁下工作时抛出了异常，并在没有调用互斥锁的 unlock 函数的情况下退出了临界区。    在这种情况下，程序很可能会冻结**，因为没有其他线程能够再获取互斥锁。这正是我们在前面例子中的 divideByNumber 函数中看到的问题。
+
+我们可以通过创建一个 `std::lock_guard` 对象来避免这个问题，该对象在整个生命周期内保持关联的互斥锁处于锁定状态。**锁在构造时被获取，并在销毁时自动释放**。这使得忘记解锁临界区变得不可能。此外，`std::lock_guard` 保证了异常安全性，因为当抛出异常时，任何临界区都会被自动解锁。在我们之前的例子中，我们可以简单地用以下代码替换`_mutex.lock()` 和 `_mutex.unlock()`：
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+
+std::mutex mtx;
+double result;
+
+void printResult(int denom)
+{
+    std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+}
+
+void divideByNumber(double num, double denom)
+{
+	std::lock_guard<std::mutex> lck(mtx);
+    try
+    {
+        // divide num by denom but throw an exception if division by zero is attempted
+        if (denom != 0) 
+        {
+            result = num / denom;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
+            printResult(denom);
+        }
+        else
+        {
+            throw std::invalid_argument("Exception from thread: Division by zero!");
+        }
+    }
+    catch (const std::invalid_argument &e)
+    {
+        // notify the user about the exception and return
+        std::cout << e.what() << std::endl;
+        return; 
+    }
+}
+
+int main()
+{
+    // create a number of threads which execute the function "divideByNumber" with varying parameters
+    std::vector<std::future<void>> futures;
+    for (double i = -5; i <= +5; ++i)
+    {
+        futures.emplace_back(std::async(std::launch::async, divideByNumber, 50.0, i));
+    }
+
+    // wait for the results
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    return 0;
+}
+```
+
+请注意，这里不再直接调用互斥锁的 lock 或 unlock 方法。我们现在有一个 std::lock_guard 对象，它将互斥锁作为参数并在创建时对其进行锁定。当方法 divideByNumber 退出时，std::lock_guard 对象在被销毁时会自动解锁互斥锁——这发生在局部变量超出作用域时。
+
+#### 练习  
+
+我们可以进一步改进这段代码，通过将互斥锁的作用范围限制到访问关键资源的部分。使互斥锁仅在修改 result 和打印 result 的时间内被锁定。
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+
+std::mutex mtx;
+double result;
+
+void printResult(int denom)
+{
+    std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+}
+
+void divideByNumber(double num, double denom)
+{
+    try
+    {
+        // divide num by denom but throw an exception if division by zero is attempted
+        if (denom != 0) 
+        {
+			     std::lock_guard<std::mutex> lck(mtx);
+            result = num / denom;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
+            printResult(denom);
+        }
+        else
+        {
+            throw std::invalid_argument("Exception from thread: Division by zero!");
+        }
+    }
+    catch (const std::invalid_argument &e)
+    {
+        // notify the user about the exception and return
+        std::cout << e.what() << std::endl;
+        return; 
+    }
+}
+
+int main()
+{
+    // create a number of threads which execute the function "divideByNumber" with varying parameters
+    std::vector<std::future<void>> futures;
+    for (double i = -5; i <= +5; ++i)
+    {
+        futures.emplace_back(std::async(std::launch::async, divideByNumber, 50.0, i));
+    }
+
+    // wait for the results
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    return 0;
+}
+```
 
 
 
+### Unique Lock  
+
+**前面例子**的问题在于，我们**只能锁定互斥锁一次**，而**控制锁定和解锁的唯一方法是使 std::lock_guard 对象的作用域失效**。但如果我们希望（或需要）**对锁定机制进行更精细的控制怎么办？**
+
+`std::lock_guard` 的一个更灵活的替代方案是 `unique_lock`，它还支持更高级的机制，例如**延迟锁定、定时锁定、递归锁定、锁所有权的转移以及条件变量**的使用（我们将在后面讨论）。它的行为与 lock_guard 类似，但提供了更多的灵活性，尤其是在锁定机制的时序行为方面。
+
+让我们来看一下上一节代码的一个改编版本：
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+#include<algorithm>
+
+std::mutex mtx;
+double result;
+
+void printResult(int denom)
+{
+    std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+}
+
+void divideByNumber(double num, double denom)
+{
+    std::unique_lock<std::mutex> lck(mtx);
+    try
+    {
+        // divide num by denom but throw an exception if division by zero is attempted
+        if (denom != 0) 
+        {   
+            result = num / denom;
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
+            printResult(denom);
+            lck.unlock();
+
+            // do something outside of the lock
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
+
+            lck.lock(); 
+            // do someting else under the lock
+            std::this_thread::sleep_for(std::chrono::milliseconds(100)); 
+        }
+        else
+        {
+            throw std::invalid_argument("Exception from thread: Division by zero!");
+        }
+    }
+    catch (const std::invalid_argument &e)
+    {
+        // notify the user about the exception and return
+        std::cout << e.what() << std::endl;
+        return; 
+    }
+}
+
+int main()
+{
+    // create a number of threads which execute the function "divideByNumber" with varying parameters
+    std::vector<std::future<void>> futures;
+    for (double i = -5; i <= +5; ++i)
+    {
+        futures.emplace_back(std::async(std::launch::async, divideByNumber, 50.0, i));
+    }
+
+    // wait for the results
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    return 0;
+}
+```
+
+在这段代码中，`std::lock_guard` 被替换为 `std::unique_lock`。与之前一样，锁对象 `lck` 会在其**析构函数中解锁互斥锁，**也就是说，当函数 `divideByNumber` 返回并且 `lck` 超出作用域时会自动解锁。除了这种自动解锁功能外，`std::unique_lock` 还提供了额外的灵活性，可以**通过手动调用 lock() 和 unlock() 方法按需启用或禁用锁**。这种能力可以显著提高并发程序的性能，尤其是在许多线程都在等待访问被锁定的资源时。在示例中，**在执行一些非关键工作（通过 sleep_for 模拟）之前，锁被释放**，**并在进入临界区执行其他工作之前重新启用**锁，从而在函数结束时再次在锁下工作。这对于优化性能和响应性非常有用，特别是在两次访问关键资源之间存在较长时间间隔的情况下。
+
+使用 `std::unique_lock<>` 而不是 `std::lock_guard` 的主要优点总结如下。使用 std::unique_lock 可以让您：
+
+1. **使用默认构造函数创建一个没有关联互斥锁的实例**
+
+    ```cpp
+    #include <iostream>
+    #include <mutex>
+    
+    int main() {
+        std::unique_lock<std::mutex> lock; // 没有关联互斥锁的默认构造
+        if (!lock.owns_lock()) { // 检查是否拥有锁
+            std::cout << "Lock is not associated with any mutex." << std::endl;
+        }
+        return 0;
+    }
+    
+    ```
+
+    
+
+   - **解释**：可以通过默认构造函数创建一个 `std::unique_lock` 对象，而这个对象在创建时并没有与任何互斥锁（`std::mutex`）相关联。这种情况下，`std::unique_lock` 是一个空对象，暂时不作用于任何互斥锁。
+   - **技术术语**：
+     - **默认构造函数**：在 C++ 中，如果一个类没有提供参数的构造函数，它被称为默认构造函数。
+     - **互斥锁（mutex）**：一种线程同步机制，用于防止多个线程同时访问共享资源。
+
+2. **使用延迟锁定构造函数创建一个关联互斥锁但初始状态为未锁定的实例**
+
+    ```cpp
+    #include <iostream>
+    #include <thread>
+    #include <mutex>
+    
+    std::mutex mtx;
+    
+    void threadFunction() {
+        std::unique_lock<std::mutex> lock(mtx, std::defer_lock); // 延迟锁定
+        std::cout << "Mutex not locked yet." << std::endl;
+    
+        lock.lock(); // 手动锁定
+        std::cout << "Mutex locked manually." << std::endl;
+    
+        lock.unlock(); // 手动解锁
+        std::cout << "Mutex unlocked manually." << std::endl;
+    }
+    
+    int main() {
+        std::thread t(threadFunction);
+        t.join();
+        return 0;
+    }
+    
+    ```
+
+    
+
+   - **解释**：可以在创建 `std::unique_lock` 对象时，将一个互斥锁传入，但初始状态下互斥锁并不会被锁定。这种方式被称为延迟锁定（deferred locking），锁的实际操作可以在稍后通过显式调用 `lock()` 方法完成。
+   - **技术术语**：
+     - **延迟锁定（deferred locking）**：一种机制，允许在稍后某个时间点再锁定互斥锁，而不是在创建锁对象时立即锁定。这种方式提供了更大的灵活性。
+     - **显式调用**：代码中明确调用某个方法，比如 `lock()`。
+
+3. **使用尝试锁定构造函数创建一个尝试锁定互斥锁的实例，如果锁定失败则保持未锁定状态**
+
+    ```cpp
+    #include <iostream>
+    #include <thread>
+    #include <mutex>
+    #include <chrono>
+    
+    std::mutex mtx;
+    
+    void threadFunction() {
+        if (std::unique_lock<std::mutex> lock(mtx, std::try_to_lock); lock.owns_lock()) { // 尝试锁定
+            std::cout << "Mutex successfully locked." << std::endl;
+        } else {
+            std::cout << "Mutex is already locked by another thread." << std::endl;
+        }
+    }
+    
+    int main() {
+        mtx.lock(); // 主线程先锁定互斥锁
+    
+        std::thread t(threadFunction);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 模拟主线程的延迟
+    
+        mtx.unlock(); // 主线程解锁互斥锁
+        t.join();
+        return 0;
+    }
+    
+    ```
+
+    
+
+   - **解释**：可以通过尝试锁定（try-lock）的方式创建 `std::unique_lock` 对象。在这种情况下，程序会尝试获取互斥锁，如果成功则锁定互斥锁；如果失败（例如互斥锁已被其他线程锁定），则保持互斥锁未锁定状态。
+   - **技术术语**：
+     - **尝试锁定（try-locking）**：一种非阻塞的锁定机制。与阻塞锁定不同，尝试锁定不会让线程无限等待，而是立即返回锁定是否成功的结果。
+     - **非阻塞（non-blocking）**：程序或线程不会因为某个操作而停下来等待，而是继续执行其他任务。
+
+4. **创建一个尝试在指定时间段内或直到某个指定时间点获取锁的实例**
+
+    ```cpp
+    #include <iostream>
+    #include <thread>
+    #include <mutex>
+    #include <chrono>
+    
+    std::timed_mutex mtx;
+    
+    void threadFunction() {
+        std::unique_lock<std::timed_mutex> lock(mtx, std::chrono::milliseconds(500)); // 尝试定时锁定
+        if (lock.owns_lock()) {
+            std::cout << "Mutex locked within the time limit." << std::endl;
+        } else {
+            std::cout << "Failed to lock mutex within the time limit." << std::endl;
+        }
+    }
+    
+    int main() {
+        mtx.lock(); // 主线程先锁定互斥锁
+        std::thread t(threadFunction);
+    
+        std::this_thread::sleep_for(std::chrono::milliseconds(600)); // 模拟主线程占用时间
+        mtx.unlock(); // 主线程解锁互斥锁
+    
+        t.join();
+        return 0;
+    }
+    
+    ```
+
+    
+
+   - **解释**：可以通过 `std::unique_lock` 的构造函数设置一个时间限制，让程序尝试在某个时间段内（比如 100 毫秒）或直到某个时间点（比如系统时间的 10:30）获取互斥锁。如果在规定时间内成功获取锁，则锁定互斥锁；否则，超时返回且互斥锁保持未锁定状态。
+   - **技术术语**：
+     - **定时锁定（time-locking）**：一种锁定机制，允许程序在规定的时间范围内尝试获取锁。如果超时未成功，则放弃锁定。
+     - **时间段（time duration）和时间点（time point）**：时间段是指一个时间长度（如 100 毫秒），时间点是指一个具体的时间（如 10:30）。
+
+尽管 `std::unique_lock<>` 和 `std::lock_guard` 相较于直接访问互斥锁有诸多优点，但如果两个互斥锁被同时访问（参见上一节），仍然可能发生死锁情况。
 
 
+
+### 使用 `std::lock()` 避免死锁  
+
+在大多数情况下，代码应该一次只对一个互斥锁持有锁。有时可以嵌套锁，例如在持有一个互斥锁的锁时调用一个用互斥锁保护其内部数据的子系统，**但通常最好尽量避免同时对多个互斥锁加锁**。然而，**有时需要对多个互斥锁加锁，因为需要对两个不同的数据元素执行操作，而每个数据元素都由其自己的互斥锁保护**。  
+
+在上一节中，我们已经看到，**如果不仔细管理锁定顺序，同时使用多个互斥锁可能会导致死锁**。为避免此问题，必须告知系统需要同时锁定两个互斥锁，以便其中一个线程接管两个锁，从而避免阻塞。这就是 `std::lock()` 函数的用途——你提供一组 `lock_guard` 或 `unique_lock` 对象，系统会确保它们在函数返回时都已被锁定。  
+
+在以下示例中，这是上一节代码的一个版本，其中 `std::mutex` 被替换为 `std::lock_guard`。
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <mutex>
+ 
+std::mutex mutex1, mutex2;
+ 
+void ThreadA()
+{
+    // Creates deadlock problem
+    std::lock_guard<std::mutex> lock2(mutex2);
+    std::cout << "Thread A" << std::endl;
+    std::lock_guard<std::mutex> lock1(mutex1);
+    
+}
+ 
+void ThreadB()
+{
+    // Creates deadlock problem
+    std::lock_guard<std::mutex> lock1(mutex1);
+    std::cout << "Thread B" << std::endl;
+    std::lock_guard<std::mutex> lock2(mutex2);
+}
+ 
+void ExecuteThreads()
+{
+    std::thread t1( ThreadA );
+    std::thread t2( ThreadB );
+ 
+    t1.join();
+    t2.join();
+ 
+    std::cout << "Finished" << std::endl;
+}
+ 
+int main()
+{
+    ExecuteThreads();
+ 
+    return 0;
+}
+```
+
+死锁发生的原因
+
+1. **线程 A 的行为**：
+    - `ThreadA` 首先对 `mutex2` 加锁（通过 `std::lock_guard<std::mutex> lock2(mutex2)`）。
+    - 在持有 `mutex2` 的锁的情况下，尝试对 `mutex1` 加锁（通过 `std::lock_guard<std::mutex> lock1(mutex1)`）。
+2. **线程 B 的行为**：
+    - `ThreadB` 首先对 `mutex1` 加锁（通过 `std::lock_guard<std::mutex> lock1(mutex1)`）。
+    - 在持有 `mutex1` 的锁的情况下，尝试对 `mutex2` 加锁（通过 `std::lock_guard<std::mutex> lock2(mutex2)`）。
+3. **死锁的关键**：
+    - 如果线程 A 在锁定`mutex2`后切换到线程 B，而线程 B 锁定了`mutex1`，此时：
+        - 线程 A 正等待线程 B 释放 `mutex1`，以便它可以加锁 `mutex1`。
+        - 线程 B 正等待线程 A 释放 `mutex2`，以便它可以加锁 `mutex2`。
+    - 这种相互等待的情况导致了**死锁**，两个线程都无法继续执行。
+
+在以下无死锁的代码中，使用了 `std::lock` 来确保无论参数的顺序如何，互斥锁始终以相同的顺序加锁。注意，`std::adopt_lock` 选项允许我们在已加锁的互斥锁上使用 `std::lock_guard`。
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <mutex>
+ 
+std::mutex mutex1, mutex2;
+ 
+void ThreadA()
+{
+    // Ensure that locks are always executed in the same order
+    std::lock(mutex1, mutex2);
+    std::lock_guard<std::mutex> lock2(mutex2, std::adopt_lock);
+    std::cout << "Thread A" << std::endl;
+    std::lock_guard<std::mutex> lock1(mutex1, std::adopt_lock);
+    
+}
+ 
+void ThreadB()
+{
+    std::lock(mutex1, mutex2);
+    std::lock_guard<std::mutex> lock1(mutex1, std::adopt_lock);
+    std::cout << "Thread B" << std::endl;
+    std::lock_guard<std::mutex> lock2(mutex2, std::adopt_lock);
+}
+ 
+void ExecuteThreads()
+{
+    std::thread t1( ThreadA );
+    std::thread t2( ThreadB );
+ 
+    t1.join();
+    t2.join();
+ 
+    std::cout << "Finished" << std::endl;
+}
+ 
+int main()
+{
+    ExecuteThreads();
+ 
+    return 0;
+}
+```
+
+**线程 A 的实现**：
+
+```cpp
+void ThreadA()
+{
+    std::lock(mutex1, mutex2);
+    std::lock_guard<std::mutex> lock2(mutex2, std::adopt_lock);
+    std::cout << "Thread A" << std::endl;
+    std::lock_guard<std::mutex> lock1(mutex1, std::adopt_lock);
+}
+```
+
+- 调用 `std::lock(mutex1, mutex2)` 同时锁定两个互斥锁。
+- 使用 `std::lock_guard` 和 `std::adopt_lock` 对已经锁定的互斥锁进行管理，确保锁在作用域结束时自动释放。
+- 打印 `"Thread A"`，表示线程 A 的执行。
+
+**线程 B 的实现**：
+
+```cpp
+void ThreadB()
+{
+    std::lock(mutex1, mutex2);
+    std::lock_guard<std::mutex> lock1(mutex1, std::adopt_lock);
+    std::cout << "Thread B" << std::endl;
+    std::lock_guard<std::mutex> lock2(mutex2, std::adopt_lock);
+}
+```
+
+- 与线程 A 类似，使用 `std::lock` 和 `std::adopt_lock` 来管理互斥锁。
+- 打印 `"Thread B"`，表示线程 B 的执行。
+
+
+
+一般来说，程序员**应尽量避免同时使用多个互斥锁**。实践表明，大多数情况下这是可以实现的。然而，对于剩余的情况，使用 `std::lock` 是避免死锁的安全方法。
+
+
+
+### Summary
+
+使用 `lock_guard` 和 `unique_lock` 管理共享资源访问的重要性，因为它们在基本互斥锁概念的基础上增加了灵活性。**不要直接使用互斥锁，因为管理不当的风险很高**，可能导致错误，其风险远大于收益。**虽然 `lock_guard` 很有效，但它无法解决由于线程间锁定顺序不当而导致的死锁问题**。这类问题可以通过**使用 `std::lock` 函数来解决**，正如之前的示例中所演示的那样。
 
 
 
 ## Exercise
 
+### Overview
 
+第三课的项目，重点是一个交通模拟程序，其中车辆会在进入路口前排队。然而，**问题在于 `WaitingVehicles` 类的实例是一个共享资源**，所有接近路口的车辆线程都会访问它。正如之前所学，当一个线程写入数据，而另一个线程读取或写入数据时，就会发生数据竞争，无论错误是否立即显现。**本项目的任务是添加一个安全层，以防止这种数据竞争的发生。**
+
+
+
+### 项目目标
+1. **发现隐藏问题**  
+   当前的交通模拟程序表面上运行良好，但实际上代码中隐藏着一个数据竞争问题。`WaitingVehicles` 类中的私有成员 `_vehicles` 和 `_promises` 是共享资源，多个线程同时访问它们，但目前没有任何保护机制。  
+   - 数据竞争的定义：当至少一个线程在写入共享资源，而其他线程可能在读取或写入时，就会发生数据竞争。
+   - 这是一个严重的 Bug，项目的目标是修复这个问题并防止数据竞争带来的潜在危害。
+
+2. **控制台输出问题**  
+   目前的程序在输出到控制台时，多个线程可能会同时写入，导致输出内容混乱（如字符串交错在一起）。项目的第二个目标是保护标准输出，使打印的字符串保持整洁有序。
+
+---
+
+### 任务说明
+#### 任务 L3.1
+
+在 `WaitingVehicles` 类中：
+
+- 使用适当的锁机制保护对私有成员 `_vehicles` 和 `_promises` 的所有访问。
+- 确保锁机制不会导致死锁，即使资源访问被意外阻塞时也能正常运行。
+
+#### 任务 L3.2
+
+在基类 `TrafficObject` 中：
+
+- 添加一个静态互斥锁 `_mtxCout`，并在源文件中正确实例化。
+- 这个互斥锁将在下一任务中用于保护标准输出（`std::cout`）。
+
+#### 任务 L3.3
+
+在以下方法中：
+
+- `Intersection::addVehicleToQueue`
+- `Vehicle::drive`
+
+确保：
+
+- 使用在上一任务中添加到基类 `TrafficObject` 的互斥锁 `_mtxCout` 保护控制台输出（`std::cout`）。
+- 在 `addVehicleToQueue` 方法的开头和结尾调用 `std::cout` 时，确保锁定和解锁互斥锁，并在两次调用之间不持有锁。
+
+---
+
+### 项目成果
+- 修复数据竞争问题，确保共享资源的线程安全。
+- 改善控制台输出，使其整洁有序，即使多个线程同时操作也不会混乱。
+- 图形界面不会改变，但修复的 Bug 是对程序的重要改进，即使用户可能不会直接注意到。
 
 
 
