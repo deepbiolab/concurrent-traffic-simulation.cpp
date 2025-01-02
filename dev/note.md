@@ -2623,13 +2623,7 @@ make
 ./traffic_simulation
 ```
 
-### Code Walkthrough
-
-
-
-
-
-
+---
 
 # 3. Mutexes and Locks
 
