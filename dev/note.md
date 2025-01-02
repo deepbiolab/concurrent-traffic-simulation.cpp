@@ -2627,21 +2627,867 @@ make
 
 # 3. Mutexes and Locks
 
-
-
 ## Introduction
 
-
+1. **Promise 和 Future 的局限性**  
+   - Promise 和 Future 的两个主要缺点：  
+     1. 它们只能使用一次（一次性使用）。  
+     2. 数据只能单向传递（从调用线程到工作线程）。  
+     这些限制使得它们在更复杂的并发场景中显得不足，尤其是需要双向通信或多次数据传递时。
+2. **共享内存与数据竞争问题**  
+   - 基于目前的知识，无法访问共享内存位置以自由交换信息，因为总是存在数据竞争的风险。”  
+     这表明在并发编程中，多个线程同时访问共享资源可能会导致数据竞争（data race），从而引发不可预测的行为或错误。  
+   - 数据竞争是并发编程中的一个核心问题，必须通过适当的工具和技术来解决。
+3. **引入 Mutex 和锁的概念**  
+   - 通过引入互斥锁（mutex）和锁（blocks），学习者将能够保护共享数据，防止并发访问导致的问题。  
+   - 互斥锁的作用是确保在同一时间只有一个线程可以访问共享资源，从而避免数据竞争。  
+   - 这部分内容为后续课程的重点奠定了基础，即如何安全地在多线程环境中读写共享数据。
+4. **死锁问题的引入**  
+   - 我们还将探讨并发编程中的新问题——死锁（deadlocks）。 
+     死锁是指两个或多个线程因为相互等待对方释放资源而陷入僵局的情况。  
+   - 这是并发编程中的另一个重要挑战，学习者需要了解如何识别和避免死锁。
 
 
 
 ## Using a Mutex to Protect Shared Data
 
+### **背景**
+- **数据竞争（Data Race）**:
+  - 当多个线程同时访问同一块共享数据，并且至少有一个线程试图修改数据时，就会发生数据竞争。
+  - 数据竞争会导致程序行为不可预测，可能引发错误。
 
+- **短期通信**:
+  - 之前提到的 **promise-future** 构造是一种短期的线程通信方式：
+    - 主线程将一个 **promise** 传递给工作线程。
+    - 工作线程完成任务后，通过 **future** 将结果返回给主线程。
+    - 这种通信方式是一次性的，适用于短期任务。
+
+---
+
+### **目标**
+- 本章的目标是介绍一种 **长期稳定的通信方式**，允许线程之间共享和修改数据。
+- 类比：
+  - 理想的通信方式类似于使用无线电对话的协议：
+    - 发送方在发送完数据后使用“over”表示传输结束。
+    - 接收方随后可以发送数据。
+  - 这种“轮流发送数据”的协议可以在 C++ 中通过 **mutex（互斥量）** 实现。
+
+---
+
+### **互斥量（Mutex）**
+- **定义**:
+  - Mutex 是 **MUtual EXclusion（互斥）** 的缩写。
+  - 它是一种同步机制，用于保证**某一时刻只有一个线程能够访问共享数据**。
+
+- **作用**:
+  - Mutex 并不能直接解决数据竞争问题，而是**提供了一种工具**，用来实现线程安全的通信协议。
+  - 通过互斥量，程序员可以控制线程的访问顺序，从而避免数据竞争。
+
+---
+
+### **为何需要互斥量**
+- 数据竞争的本质是 **多个线程同时访问共享内存**。
+- 如果可以保证：
+  1. **同一时间只有一个线程访问共享数据**。
+  2. **线程之间有明确的轮流通信协议**。
+  - 那么数据竞争问题就可以避免。
+
+<img src="assets/C4-2-A2.png" alt="C4-2-A2" style="zoom:50%;" />
+
+### **协议的工作原理**
+- **共享内存与互斥量的绑定**:
+  - 假设有一块共享内存（例如一个共享变量），我们希望保护它免受多个线程的同时访问。
+  - 为此，我们将一个 **mutex** 分配给这块内存，作为它的“守护者”。
+  - **关键点**: 一个互斥量与它保护的内存绑定在一起，负责管理对这块内存的访问。
+
+- **线程访问的规则**:
+  - 当线程 1 想要访问共享内存时，它必须首先“锁定（lock）”互斥量。
+  - 一旦线程 1 成功锁定了互斥量，其他线程（例如线程 2）就会被阻止访问共享内存。
+  - 线程 2 会尝试获取锁，但由于互斥量已经被线程 1 锁定，它无法获取锁，并会被系统暂时挂起（suspended）。
+
+- **释放锁**:
+  - 当线程 1 完成了对共享内存的读写操作后，它必须“解锁（unlock）”互斥量。
+  - 解锁后，其他等待访问共享内存的线程（例如线程 2）会被唤醒，并获得互斥量的锁，从而继续执行它们的操作。
+
+---
+
+### **关键术语解释**
+#### **Mutex（互斥量）**
+- **定义**:
+  - Mutex 是一个同步原语，用于确保在某一时刻只有一个线程可以访问特定的共享资源。
+  - 它通过“锁定”和“解锁”机制来管理线程对共享内存的访问。
+
+- **作用**:
+  - 通过互斥量，可以防止多个线程同时访问共享内存，从而避免数据竞争。
+
+#### **Critical Section（临界区）**
+- **定义**:
+  - 临界区是指需要受互斥量保护的代码块。
+  - 这些代码块通常涉及对共享内存的读写操作。
+  - **特点**:
+    - 只有一个线程可以在任意时刻进入临界区。
+    - 即使是只读访问，也必须先锁定互斥量，以防止其他线程在同时修改数据时引发数据竞争。
+
+#### **Data Race（数据竞争）**
+- **定义**:
+  - 当多个线程同时访问共享内存，且至少有一个线程试图修改数据时，就会发生数据竞争。
+  - 数据竞争会导致程序行为不可预测，可能引发崩溃或逻辑错误。
+
+#### **Suspended（挂起）**
+- **定义**:
+  - 当一个线程尝试获取互斥量的锁但失败时，它会被系统挂起，直到锁被释放。
+  - 挂起的线程会进入等待队列，等待被唤醒。
+
+---
+
+### **线程竞争与调度**
+- **互斥量的竞争**:
+  - 当多个线程同时尝试获取互斥量时，只有一个线程会成功获取锁。
+  - 其他线程会被放入等待队列，类似于车辆在红绿灯前排队等待通行。
+
+- **线程唤醒**:
+  - 当持有锁的线程完成任务并释放互斥量时，等待队列中的线程会被依次唤醒。
+  - 被唤醒的线程会尝试获取锁，并进入临界区执行它的任务。
+
+---
+
+### **避免数据竞争的条件**
+- 所有线程必须遵循以下协议：
+  1. 在访问共享内存之前，必须先锁定互斥量。
+  2. 在完成对共享内存的操作后，必须解锁互斥量。
+  3. 即使是只读访问，也需要锁定互斥量，以防止其他线程同时修改数据。
+
+- **如果所有线程都遵守这些规则，数据竞争就可以被有效避免**。
+
+### **Case: 并发导致的数据竞争示例**
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include<algorithm>
+
+class Vehicle
+{
+public:
+    Vehicle(int id) : _id(id) {}
+
+private:
+    int _id;
+};
+
+class WaitingVehicles
+{
+public:
+    WaitingVehicles() : _tmpVehicles(0) {}
+
+    // getters / setters
+    void printSize()
+    {
+        std::cout << "#vehicles = " << _tmpVehicles << std::endl;
+    }
+
+    // typical behaviour methods
+    void pushBack(Vehicle &&v)
+    {
+        //_vehicles.push_back(std::move(v)); // data race would cause an exception
+        int oldNum = _tmpVehicles;
+        std::this_thread::sleep_for(std::chrono::microseconds(1)); // wait deliberately to expose the data race
+        _tmpVehicles = oldNum + 1;
+    }
+
+private:
+    std::vector<Vehicle> _vehicles; // list of all vehicles waiting to enter this intersection
+    int _tmpVehicles; 
+};
+
+int main()
+{
+    std::shared_ptr<WaitingVehicles> queue(new WaitingVehicles); 
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < 1000; ++i)
+    {
+        Vehicle v(i);
+        futures.emplace_back(std::async(std::launch::async, &WaitingVehicles::pushBack, queue, std::move(v)));
+    }
+
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    queue->printSize();
+
+    return 0;
+}
+
+```
+
+1. **类定义**:
+   - **Vehicle**:
+     - 表示一个简单的车辆对象，只有一个成员变量 `_id`。
+   - **WaitingVehicles**:
+     - 设计用于存储车辆的队列。
+     - 包含一个 `std::vector<Vehicle>` 用于存储车辆，以及一个临时变量 `_tmpVehicles` 用于计数（代替直接操作向量，目的是暴露数据竞争问题）。
+
+2. **pushBack() 方法**:
+   - 模拟向队列中添加车辆。
+   - 使用 `_tmpVehicles` 计数器记录添加的车辆数量。
+   - 在操作 `_tmpVehicles` 时引入了 `std::this_thread::sleep_for`，故意制造线程暂停以暴露数据竞争问题。
+
+3. **main() 函数**:
+   - 创建了一个共享的 `WaitingVehicles` 对象。
+   - 使用循环启动 1000 个线程，每个线程尝试向队列中添加一个车辆。
+   - 使用 `std::async` 并发地运行这些线程。
+   - 最后打印 `_tmpVehicles` 的值，显示添加到队列中的车辆数量。
+
+#### **问题分析**
+##### **数据竞争的发生**
+- **操作过程**:
+  1. 在 `pushBack()` 中，当前 `_tmpVehicles` 的值被存储到临时变量 `oldNum`。
+  2. 然后线程暂停（`sleep_for`），允许其他线程继续执行。
+  3. 当暂停的线程恢复时，它将 `oldNum + 1` 的值写回 `_tmpVehicles`。
+  4. 如果其他线程在此期间修改了 `_tmpVehicles`，这些修改将被覆盖，从而丢失了其他线程的贡献。
+
+- **数据竞争的本质**:
+  - 多个线程同时访问和修改共享变量 `_tmpVehicles`，导致结果不可预测。
+  - 线程之间没有同步机制来确保对 `_tmpVehicles` 的访问是安全的。
+
+##### **实验结果**:
+- **std::launch::deferred**:
+  - 线程按顺序执行，程序是同步的。
+  - 因为没有并发，所有线程都能正确地更新 `_tmpVehicles`，最终输出是 `#vehicles = 1000`。
+
+- **std::launch::async**:
+  - 线程并发执行，暴露了数据竞争问题。
+  - `_tmpVehicles` 的值经常小于 1000，因为多个线程的更新操作互相覆盖，导致数据丢失。
+
+
+
+### **使用互斥量（Mutex）保护数据**
+
+#### **互斥量的基本操作**
+1. **引入 `<mutex>` 头文件**:
+   - 提供了 C++ 标准库中的互斥量类 `std::mutex`。
+
+2. **创建 `std::mutex` 对象**:
+   - 在类中定义一个互斥量作为私有成员变量（`std::mutex _mutex`）。
+
+3. **加锁与解锁**:
+   - **加锁**: 在访问共享资源（如 `_vehicles`）之前调用 `_mutex.lock()`。
+   - **解锁**: 在访问完成后调用 `_mutex.unlock()`。
+
+---
+
+#### **代码示例**
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+#include<algorithm>
+
+class Vehicle
+{
+public:
+    Vehicle(int id) : _id(id) {}
+
+private:
+    int _id;
+};
+
+class WaitingVehicles
+{
+public:
+    WaitingVehicles() {}
+
+    // getters / setters
+    void printSize()
+    {
+        _mutex.lock();
+        std::cout << "#vehicles = " << _vehicles.size() << std::endl;
+        _mutex.unlock();
+    }
+
+    // typical behaviour methods
+    void pushBack(Vehicle &&v)
+    {
+        _mutex.lock();
+        _vehicles.emplace_back(std::move(v)); // data race would cause an exception
+        _mutex.unlock();
+    }
+
+private:
+    std::vector<Vehicle> _vehicles; // list of all vehicles waiting to enter this intersection
+    std::mutex _mutex;
+};
+
+int main()
+{
+    std::shared_ptr<WaitingVehicles> queue(new WaitingVehicles); 
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < 1000; ++i)
+    {
+        Vehicle v(i);
+        futures.emplace_back(std::async(std::launch::async, &WaitingVehicles::pushBack, queue, std::move(v)));
+    }
+
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    queue->printSize();
+
+    return 0;
+}
+
+```
+
+#### **`WaitingVehicles` 类**
+- **数据成员**:
+  - `_vehicles`: 存储车辆的 `std::vector`，是共享资源。
+  - `_mutex`: 用于保护 `_vehicles` 的互斥量。
+
+- **方法**:
+  1. **`pushBack`**:
+     - 向 `_vehicles` 添加一个 `Vehicle` 对象。
+     - 在操作 `_vehicles` 前加锁，操作完成后解锁。
+     - **避免数据竞争**:
+       - 如果没有互斥量，多个线程可能同时访问 `_vehicles`，导致未定义行为（如崩溃或数据丢失）。
+       - 使用互斥量确保每次只有一个线程可以操作 `_vehicles`。
+
+     ```cpp
+     void pushBack(Vehicle &&v)
+     {
+         _mutex.lock();                     // 加锁
+         _vehicles.emplace_back(std::move(v)); // 安全地向 vector 添加元素
+         _mutex.unlock();                   // 解锁
+     }
+     ```
+
+  2. **`printSize`**:
+     
+     - 打印 `_vehicles` 的大小。
+     - 加锁的原因：
+       1. 防止数据竞争：在打印时，可能有其他线程正在写入 `_vehicles`。
+       2. 确保线程独占输出流（`std::cout`），避免多个线程同时打印导致输出混乱。
+     
+     ```cpp
+     void printSize()
+     {
+         _mutex.lock();                     // 加锁
+         std::cout << "#vehicles = " << _vehicles.size() << std::endl;
+         _mutex.unlock();                   // 解锁
+     }
+     ```
+
+---
+
+#### **`main` 函数**
+1. 创建一个共享的 `WaitingVehicles` 对象:
+   ```cpp
+   std::shared_ptr<WaitingVehicles> queue(new WaitingVehicles);
+   ```
+
+2. 使用 `std::async` 启动 1000 个线程:
+   - 每个线程向 `queue` 中添加一个 `Vehicle` 对象。
+   - 使用 `std::launch::async` 启动线程以并发执行。
+
+   ```cpp
+   for (int i = 0; i < 1000; ++i)
+   {
+       Vehicle v(i);
+       futures.emplace_back(std::async(std::launch::async, &WaitingVehicles::pushBack, queue, std::move(v)));
+   }
+   ```
+
+3. 等待所有线程完成:
+   - 遍历 `futures`，对每个 `std::future` 调用 `wait()`，确保所有线程任务完成。
+
+   ```cpp
+   std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+       ftr.wait();
+   });
+   ```
+
+4. 打印最终的车辆数量:
+   - 调用 `printSize`，输出 `_vehicles` 的大小。
+   - 由于使用了互斥量保护，结果始终是 `#vehicles = 1000`。
+
+   ```cpp
+   queue->printSize();
+   ```
+
+---
+
+#### **代码的线程安全性**
+#### **避免数据竞争**
+- **数据竞争场景**:
+  - 多个线程同时访问 `_vehicles`，一个线程可能正在写入，另一个线程可能正在读取或写入。
+  - 如果没有同步机制，程序会产生未定义行为。
+
+- **互斥量的作用**:
+  - 通过加锁和解锁，确保在任意时刻只有一个线程可以访问 `_vehicles`，从而避免数据竞争。
+
+#### **线程独占输出流**
+- 多线程环境下，多个线程可能同时向控制台输出，导致打印结果混乱。
+- 在 `printSize` 中加锁，确保打印操作是线程安全的。
+
+
+
+### 练习：如何**重试或超时退出**
+
+---
+
+#### **`std::timed_mutex`**
+1. **`std::timed_mutex` 的功能**:
+   - 提供与 `std::mutex` 类似的基本锁定功能（`lock` 和 `unlock`）。
+   - 额外提供了两种尝试获取锁的方法：
+     - **`try_lock_for`**: 尝试获取锁，等待指定的时间段。如果锁在这段时间内可用，则获取成功，否则失败。
+     - **`try_lock_until`**: 尝试获取锁，直到某个时间点。如果在时间点之前锁可用，则获取成功，否则失败。
+
+2. **使用场景**:
+   - 当线程需要尝试获取锁，但不想无限期阻塞时，可以使用 `try_lock_for` 或 `try_lock_until`。
+   - 适用于需要对锁定失败进行处理的场景，例如**重试或超时退出**。
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+#include<algorithm>
+
+class Vehicle
+{
+public:
+    Vehicle(int id) : _id(id) {}
+    int getID() { return _id; }
+
+private:
+    int _id;
+};
+
+class WaitingVehicles
+{
+public:
+    WaitingVehicles() {}
+
+    // getters / setters
+    void printSize()
+    {
+        _mutex.lock();
+        std::cout << "#vehicles = " << _vehicles.size() << std::endl;
+        _mutex.unlock();
+    }
+
+    // typical behaviour methods
+    void pushBack(Vehicle &&v)
+    {
+        for (size_t i = 0; i < 3; ++i)
+        {
+            if (_mutex.try_lock_for(std::chrono::milliseconds(50)))
+            {
+                _vehicles.emplace_back(std::move(v));
+                // std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                _mutex.unlock();
+                break;
+            }
+            else
+            {
+                std::cout << "Error! Vehicle #" << v.getID() << " could not be added to the vector" << std::endl;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        }
+    }
+
+private:
+    std::vector<Vehicle> _vehicles; // list of all vehicles waiting to enter this intersection
+    std::timed_mutex _mutex;
+};
+
+int main()
+{
+    std::shared_ptr<WaitingVehicles> queue(new WaitingVehicles);
+    std::vector<std::future<void>> futures;
+    for (int i = 0; i < 1000; ++i)
+    {
+        Vehicle v(i);
+        futures.emplace_back(std::async(std::launch::async, &WaitingVehicles::pushBack, queue, std::move(v)));
+    }
+
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    queue->printSize();
+
+    return 0;
+}
+
+```
+
+#### **替换为 `std::timed_mutex`**
+- 将 `WaitingVehicles` 类的成员变量 `_mutex` 替换为 `std::timed_mutex`，以支持定时尝试锁定。
+
+#### **使用 `try_lock_for`**
+- 在 `pushBack` 函数中使用 `try_lock_for` 尝试获取锁，而不是直接调用 `lock`。
+- **限制条件**:
+  - 最多尝试 3 次获取锁。
+  - 每次失败时：
+    - 打印一条错误消息，包括车辆的 `id`。
+    - 让线程休眠一段时间（例如 100 毫秒），然后再尝试。
+
+#### **引入延迟释放锁**
+- 在成功获取锁后，添加一个 `std::this_thread::sleep_for` 调用，模拟操作完成后释放锁的延迟。
+- **目的是**:
+  - 暴露线程之间的竞争条件，观察延迟释放锁对程序行为的影响。
+
+#### **实验和观察**
+- 通过调整以下参数，观察最终有多少车辆被成功添加到 `_vehicles`：
+  - `try_lock_for` 的等待时间。
+  - 每次尝试失败后线程休眠的时间。
+  - 延迟释放锁的时间。
+
+---
+
+#### 注意事项
+
+这段代码中涉及三个时间参数，它们分别用于控制线程的行为和模拟锁竞争的场景。以下是对每个时间参数及其作用的详细解释：
+
+三个时间参数的作用可以总结为以下几点：
+1. **`50 毫秒`（锁获取超时）**:
+   - 控制线程获取锁的等待时间，避免长时间阻塞。
+2. **`10 毫秒`（延迟释放锁）**:
+   - 模拟线程在临界区中操作耗时的情况，加剧锁竞争。
+3. **`100 毫秒`（失败后休眠）**:
+   - 失败后的退避机制，减少无效的锁请求，避免浪费 CPU 资源。
+
+通过调整这些时间参数，可以观察到不同线程竞争锁时的行为，例如成功添加的车辆数量、锁竞争的激烈程度等。
+
+
+
+### 示例1：因异常抛出失败导致的死锁
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include<algorithm>
+
+double result;
+
+void printResult(int denom)
+{
+    std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+}
+
+void divideByNumber(double num, double denom)
+{
+    try
+    {
+        // divide num by denom but throw an exception if division by zero is attempted
+        if (denom != 0) 
+        {
+            result = num / denom;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
+            printResult(denom);
+        }
+        else
+        {
+            throw std::invalid_argument("Exception from thread: Division by zero!");
+        }
+    }
+    catch (const std::invalid_argument &e)
+    {
+        // notify the user about the exception and return
+        std::cout << e.what() << std::endl;
+        return; 
+    }
+}
+
+int main()
+{
+    // create a number of threads which execute the function "divideByNumber" with varying parameters
+    std::vector<std::future<void>> futures;
+    for (double i = -5; i <= +5; ++i)
+    {
+        futures.emplace_back(std::async(std::launch::async, divideByNumber, 50.0, i));
+    }
+
+    // wait for the results
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    return 0;
+}
+```
+
+```cpp
+Exception from thread: Division by zero!
+for denom = -5, the result is 12.5
+for denom = -4, the result is for denom = -3, the result is 12.5
+12.5
+for denom = -2for denom = , the result is -1, the result is 12.5
+12.5
+for denom = 2, the result is 12.5
+for denom = 3, the result is for denom = 12.5
+1, the result is 12.5
+```
+
+#### 问题分析
+
+**问题 1：全局变量导致的数据竞争**
+
+```cpp
+double result;
+```
+- **原因**:
+  - 全局变量 `result` 是所有线程共享的，但线程之间并没有任何同步机制来保护对它的访问。
+  - 在多线程环境中，多个线程可能同时写入 `result`，导致数据竞争。
+  - 由于 `std::this_thread::sleep_for**` 模拟了延迟，增加了线程之间的交替执行的可能性，从而暴露了数据竞争问题**。
+- **表现**:
+  - 不同线程可能覆盖彼此的结果，导致输出中的结果出现多次或错误值。
+  - 输出的结果并不总是与对应的 `denom` 匹配。
+
+**问题 2：多个线程同时向控制台输出**
+
+```cpp
+std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+```
+- **原因**:
+  - 多个线程同时执行 `std::cout` 操作，导致控制台输出混乱。
+  - `std::cout` 本身并不是线程安全的，因此多个线程可能同时写入控制台，导致输出内容交错或重叠。
+- **表现**:
+  - 控制台输出的内容混乱，部分结果可能被截断或交错。
+  - 例如，`for denom = -4, the result is for denom = -3, the result is 12.5`，这是多个线程的输出交错在一起的结果。
+
+#### 解决方案
+
+通过mutex解决后
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <vector>
+#include <future>
+#include <mutex>
+
+std::mutex mtx;
+double result;
+
+void printResult(int denom)
+{
+    std::cout << "for denom = " << denom << ", the result is " << result << std::endl;
+}
+
+void divideByNumber(double num, double denom)
+{
+    mtx.lock();
+    try
+    {
+        // divide num by denom but throw an exception if division by zero is attempted
+        if (denom != 0) 
+        {
+            result = num / denom;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1)); 
+            printResult(denom);
+        }
+        else
+        {
+            throw std::invalid_argument("Exception from thread: Division by zero!");
+        }
+    }
+    catch (const std::invalid_argument &e)
+    {
+        // notify the user about the exception and return
+        std::cout << e.what() << std::endl;
+        return; 
+    }
+    mtx.unlock();
+}
+
+int main()
+{
+    // create a number of threads which execute the function "divideByNumber" with varying parameters
+    std::vector<std::future<void>> futures;
+    for (double i = -5; i <= +5; ++i)
+    {
+        futures.emplace_back(std::async(std::launch::async, divideByNumber, 50.0, i));
+    }
+
+    // wait for the results
+    std::for_each(futures.begin(), futures.end(), [](std::future<void> &ftr) {
+        ftr.wait();
+    });
+
+    return 0;
+}
+```
+
+#### 潜在的死锁问题
+
+在当前代码中，虽然使用了 `std::mutex` 来保护共享资源 `result`，但仍然存在一些问题需要解决：
+
+1. **潜在的死锁问题**：
+   - 如果在临界区内（即锁定了 `mtx` 后）发生异常，`mtx.unlock()` 将不会被执行，从而导致死锁。
+   - 例如，当 `denom == 0` 时会抛出异常，但由于没有释放锁，其他线程将永远无法访问临界区。
+
+2. **控制台输出没有被保护**：
+   - `std::cout` 并不是线程安全的，因此多个线程同时输出时可能会导致混乱。
+
+
+
+### 示例2：两个mutex互相锁定导致的死锁
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <mutex>
+ 
+std::mutex mutex1, mutex2;
+ 
+void ThreadA()
+{
+    // Creates deadlock problem
+    mutex2.lock();
+    std::cout << "Thread A" << std::endl;
+    mutex1.lock();
+    mutex2.unlock();
+    mutex1.unlock();
+}
+ 
+void ThreadB()
+{
+    // Creates deadlock problem
+    mutex1.lock();
+    std::cout << "Thread B" << std::endl;
+    mutex2.lock();
+    mutex1.unlock();
+    mutex2.unlock();
+}
+ 
+void ExecuteThreads()
+{
+    std::thread t1( ThreadA );
+    std::thread t2( ThreadB );
+ 
+    t1.join();
+    t2.join();
+ 
+    std::cout << "Finished" << std::endl;
+}
+ 
+int main()
+{
+    ExecuteThreads();
+ 
+    return 0;
+}
+```
+
+#### **问题分析**
+
+在这段代码中，出现了一个经典的**死锁（deadlock）**问题。死锁的发生是因为两个线程（`ThreadA` 和 `ThreadB`）以不同的顺序锁定了两个互斥锁（`mutex1` 和 `mutex2`），导致以下情况：
+
+1. `ThreadA` 先锁定了 `mutex2`，然后尝试锁定 `mutex1`。
+2. `ThreadB` 先锁定了 `mutex1`，然后尝试锁定 `mutex2`。
+3. 两个线程都在等待对方释放另一个互斥锁，结果导致程序进入死锁状态，无法继续执行。
+
+<img src="assets/C4-2-A6c.png" alt="C4-2-A6c" style="zoom:50%;" />
+
+从逻辑上看，发生死锁的过程如下：
+
+1. **线程 A**
+   - 锁定 `mutex2`。
+   - 等待 `mutex1`。
+2. **线程 B**
+   - 锁定 `mutex1`。
+   - 等待 `mutex2`。
+
+由于两个线程都在等待对方释放锁，程序陷入了一个**无法打破的循环**。
+
+#### 解决方案
+
+在之前的代码中，死锁的根本原因是两个线程 (`ThreadA` 和 `ThreadB`) 锁定资源的顺序不一致：
+
+- `ThreadA` 先锁定 `mutex2`，然后尝试锁定 `mutex1`。
+- `ThreadB` 先锁定 `mutex1`，然后尝试锁定 `mutex2`。
+
+为了避免死锁，可以采用**资源排序法**：
+
+- 给所有资源编号，并要求线程按照严格的顺序请求资源。
+- 比如，先锁定编号小的资源，再锁定编号大的资源。
+
+在本例中，可以规定：
+
+- `mutex1` 的编号为 1。
+- `mutex2` 的编号为 2。
+- 所有线程必须先锁定 `mutex1`，再锁定 `mutex2`。
+
+```cpp
+#include <iostream>
+#include <thread>
+#include <mutex>
+ 
+std::mutex mutex1, mutex2;
+ 
+void ThreadA()
+{
+    // Solves deadlock problem
+    mutex1.lock();
+    std::cout << "Thread A" << std::endl;
+    mutex2.lock();
+    mutex2.unlock();
+    mutex1.unlock();
+}
+ 
+void ThreadB()
+{
+    // Solves deadlock problem
+    mutex1.lock();
+    std::cout << "Thread B" << std::endl;
+    mutex2.lock();
+    mutex1.unlock();
+    mutex2.unlock();
+}
+ 
+void ExecuteThreads()
+{
+    std::thread t1( ThreadA );
+    std::thread t2( ThreadB );
+ 
+    t1.join();
+    t2.join();
+ 
+    std::cout << "Finished" << std::endl;
+}
+ 
+int main()
+{
+    ExecuteThreads();
+ 
+    return 0;
+}
+```
+
+
+
+### 总结
+
+本节介绍了互斥锁（mutex）作为一种工具，用于保护共享数据免受多个线程的并发访问。互斥锁有多种形式，包括带有定时功能的版本，可以防止线程无限期地锁定。然而，互斥锁也存在一些风险，例如死锁（deadlock）。当程序员忘记解锁互斥锁，或者程序在锁定和解锁之间崩溃时，就可能导致程序永久阻塞。此外，当两个互斥锁以任意顺序独立锁定时，也可能发生另一种形式的死锁。尽管互斥锁为我们提供了新的可能性，但在使用时必须谨慎，以避免这些危险。下一节将重点介绍如何减轻这些风险并完全避免死锁的方法。
 
 
 
 ## Using Locks to Avoid Deadlocks
+
+
+
+
 
 
 
